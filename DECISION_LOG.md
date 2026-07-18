@@ -177,3 +177,83 @@ decisions made in that commit — not a changelog of what files were touched.
   process-lifetime singletons that `main.py` (commit 4) will own and wire
   together at startup; keeping this class free of their construction
   details (API keys, Redis URL) keeps it testable in isolation.
+
+---
+
+## Commit 4 — FastAPI routes and WS endpoint
+
+**Files:** `backend/main.py`, `backend/requirements.txt` (added `uvicorn`, `python-dotenv`)
+
+- **"Rate limit the /portfolio/add endpoint (max 50 holdings)" is
+  implemented as a holdings-count cap (`store.count_holdings() >= 50` →
+  `429`), not a request-rate limiter (e.g. N requests/minute per IP).** The
+  spec's own parenthetical — `(max 50 holdings)` — reads as a definition of
+  what "rate limit" means here, not a separate requirement on top of one. A
+  real per-IP throttle would need a new dependency (`slowapi` or similar)
+  and a decision about IP-extraction behind Railway's proxy; the simpler
+  reading avoids pulling that in for a requirement that's actually about
+  bounding portfolio size, not request volume. If per-IP throttling turns
+  out to be the intent, it's a small addition on top of this, not a
+  redesign.
+
+- **Singletons (`PortfolioStore`, `AlpacaClient`, `WebSocketManager`) are
+  constructed inside the `lifespan` context manager and hung off
+  `app.state`**, not module-level globals. `AlpacaClient.__init__` calls
+  `asyncio.get_running_loop()` (commit 2) — that only works inside a
+  running event loop, and `lifespan` is the first point in a FastAPI app's
+  life where one is guaranteed to exist. Module-level construction would
+  either crash on import or silently capture the wrong loop.
+
+- **`on_quote` is a small closure passed into `AlpacaClient`, not
+  `manager.on_quote` directly, because `manager` doesn't exist yet at the
+  point `AlpacaClient` is constructed** (the manager's constructor takes
+  the client as an argument). The closure defers the lookup of `manager`
+  until it's actually called, sidestepping a chicken-and-egg construction
+  order without restructuring either class.
+
+- **`DELETE /portfolio/{ticker}` validates the path param against the same
+  `TICKER_RE` used by the `Holding` model, and checks existence
+  (`get_holding` → 404) before deleting.** Path params bypass Pydantic body
+  validation entirely, so without this a malformed ticker (lowercase, too
+  long, symbols) would reach `PortfolioStore.remove_holding` unchecked —
+  harmless against Redis itself, but inconsistent with the "uppercase alpha
+  only, max 5 chars" validation the `POST` path gets for free.
+
+- **`POST /portfolio/add` is an upsert, not add-only.** `PortfolioStore.add_holding`
+  is an `HSET`, which already overwrites; rejecting a duplicate ticker with
+  a 409 would require an extra existence check for no real benefit — letting
+  a user "add AAPL again" just update its quantity/avg_cost is the more
+  useful behavior for a portfolio-management UI (re-adding after a
+  cost-basis change, not just an error state to guard against).
+
+- **CORS origin is read from a new `FRONTEND_ORIGIN` env var** (defaulting
+  to `http://localhost:3000` for local dev), which isn't in the spec's
+  listed backend env vars. "CORS configured for frontend origin only" isn't
+  satisfiable with a hardcoded value once the frontend has a real Vercel
+  URL, so this had to exist as *something* — called out explicitly here
+  since it's an addition to the documented environment variable list, not
+  because the decision itself is complex.
+
+- **`load_dotenv()` runs at import time in `main.py`.** Railway/Vercel
+  inject real environment variables directly (no `.env` file in
+  production), so this only matters for local development — added
+  `python-dotenv` to `requirements.txt` for that path, and it's a no-op
+  when no `.env` file exists.
+
+- **News polling is intentionally not wired up in this commit.**
+  `main.py`'s lifespan starts the Alpaca price stream and loads existing
+  holdings, but doesn't call `alpaca_client.start_news_polling(...)` yet —
+  `news_service.py` (the thing that would actually consume the polled
+  articles) doesn't exist until commit 5. Wiring a call to a service that
+  isn't there yet would be dead/broken code sitting in the tree between
+  commits.
+
+- **Verification note:** confirmed `main.py` imports cleanly and all five
+  routes (`/health`, `/portfolio`, `/portfolio/add`, `/portfolio/{ticker}`,
+  `/ws`) register correctly against the real `fastapi`/`alpaca-py`
+  packages in an isolated venv. Did *not* runtime-test the lifespan
+  (Redis connect, Alpaca stream auth, a live WebSocket round trip) — no
+  local Redis or Docker daemon was available in this environment, and real
+  Alpaca/Groq credentials aren't in scope here. That end-to-end path still
+  needs manual verification against real `.env` values before this is
+  trusted in a deployed environment.
