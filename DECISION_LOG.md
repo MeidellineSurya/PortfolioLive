@@ -117,3 +117,63 @@ decisions made in that commit — not a changelog of what files were touched.
   backend locally for the first time (to verify `alpaca_client.py` imports
   against the real SDK) immediately produced a stray `backend/__pycache__/`
   directory that would otherwise have been picked up by the next commit.
+
+---
+
+## Commit 3 — WebSocket manager (fan-out)
+
+**Files:** `backend/websocket_manager.py`, `backend/alpaca_client.py` (added `get_previous_close`)
+
+- **`change`/`change_pct` are computed against the previous trading day's
+  close, fetched once per ticker via `AlpacaClient.get_previous_close`
+  (a new method backed by `StockHistoricalDataClient.get_stock_snapshot`,
+  reading `previous_daily_bar.close`) — not against "the first price seen
+  this process." The spec's broadcast format includes `change`/`change_pct`
+  but doesn't say what they're relative to; using the prior close matches
+  how every retail portfolio UI defines "today's change" and avoids the
+  alternative's obvious bug — a `change` of `0.0` on every ticker's first
+  tick after a server restart, which would look broken.
+
+- **This landed in commit 3, not commit 2, even though the code lives partly
+  in `alpaca_client.py`.** `get_previous_close` only exists to serve the P&L
+  calculation added here — it wasn't needed (or knowable as needed) until
+  writing the broadcast logic surfaced the "relative to what?" question.
+  Splitting it out into its own commit 2 addendum would've been a smaller
+  diff but a less honest history of when and why the decision was made.
+
+- **Previous close is cached in memory for the process lifetime, not
+  refreshed at day rollover.** A full implementation would re-fetch at
+  market open each day; that's real complexity (a scheduler, a definition
+  of "market open" that accounts for holidays) that nothing in the spec
+  asks for. Documented here as a known limitation rather than built
+  speculatively — restarting the backend picks up the new day's previous
+  close as a side effect of every ticker being re-subscribed from scratch
+  on startup.
+
+- **`position_pnl_pct` is relative to cost basis (`avg_cost * quantity`),
+  not to `position_value`.** `position_pnl / cost_basis` is "return on what
+  you paid," which is what "P&L %" conventionally means for a position;
+  using `position_value` in the denominator would silently understate
+  percentage gains (dividing by the already-inflated current value) and
+  overstate percentage losses.
+
+- **`broadcast` iterates a snapshot-safe pattern: send to every client
+  inside the loop, collect failures into a `dead` list, then disconnect
+  them after the loop.** Mutating `self._clients` (a `set`) while iterating
+  it — e.g. calling `self.disconnect()` for a client whose `send_json`
+  raised, from inside the same loop — would raise `RuntimeError: Set
+  changed size during iteration`.
+
+- **`on_quote` drops the tick (returns early) if the ticker isn't found in
+  the portfolio store**, rather than broadcasting anyway. This handles the
+  narrow race where a ticker was just removed via `DELETE /portfolio/{ticker}`
+  but the Alpaca `unsubscribe_quotes` round trip (a cross-thread call, see
+  commit 2) hasn't completed yet — an in-flight quote could otherwise arrive
+  for a holding that no longer exists, and computing P&L against a
+  nonexistent `avg_cost`/`quantity` doesn't mean anything.
+
+- **`WebSocketManager` takes `AlpacaClient` and `PortfolioStore` as
+  constructor arguments rather than constructing them itself.** Both are
+  process-lifetime singletons that `main.py` (commit 4) will own and wire
+  together at startup; keeping this class free of their construction
+  details (API keys, Redis URL) keeps it testable in isolation.

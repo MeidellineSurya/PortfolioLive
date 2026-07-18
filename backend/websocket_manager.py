@@ -1,0 +1,97 @@
+"""Bridges Alpaca price ticks to connected frontend WebSocket clients.
+
+Owns the one-Alpaca-connection-for-everyone invariant: individual tickers
+are subscribed/unsubscribed on the shared ``AlpacaClient`` as holdings are
+added/removed, and every incoming quote is turned into a P&L-aware
+``PriceUpdate`` broadcast to all connected frontend clients.
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import WebSocket
+
+from alpaca_client import AlpacaClient
+from models import PriceUpdate
+from portfolio_store import PortfolioStore
+
+logger = logging.getLogger(__name__)
+
+
+class WebSocketManager:
+    def __init__(self, alpaca_client: AlpacaClient, portfolio_store: PortfolioStore):
+        self._alpaca = alpaca_client
+        self._store = portfolio_store
+        self._clients: set[WebSocket] = set()
+        # Previous close is fetched once per ticker (not per tick) and kept
+        # in memory for the life of the process — see decision log for why
+        # day-rollover refresh is out of scope.
+        self._prev_close: dict[str, float] = {}
+
+    # ---- frontend client management ------------------------------------
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self._clients.add(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self._clients.discard(websocket)
+
+    async def broadcast(self, message: dict) -> None:
+        if not self._clients:
+            return
+        dead: list[WebSocket] = []
+        for client in self._clients:
+            try:
+                await client.send_json(message)
+            except Exception:
+                dead.append(client)
+        for client in dead:
+            self.disconnect(client)
+
+    # ---- portfolio <-> Alpaca subscription bridge -----------------------
+
+    async def track_ticker(self, ticker: str) -> None:
+        if ticker not in self._prev_close:
+            prev_close = await self._alpaca.get_previous_close(ticker)
+            if prev_close is not None:
+                self._prev_close[ticker] = prev_close
+        await self._alpaca.subscribe_quote(ticker)
+
+    async def untrack_ticker(self, ticker: str) -> None:
+        await self._alpaca.unsubscribe_quote(ticker)
+        self._prev_close.pop(ticker, None)
+
+    async def load_initial_holdings(self) -> None:
+        holdings = await self._store.get_all_holdings()
+        for holding in holdings:
+            await self.track_ticker(holding.ticker)
+
+    # ---- Alpaca quote callback (registered as AlpacaClient's on_quote) --
+
+    async def on_quote(self, ticker: str, price: float) -> None:
+        holding = await self._store.get_holding(ticker)
+        if holding is None:
+            # Ticker was removed from the portfolio after subscribing but
+            # before the unsubscribe round trip completed; drop the tick.
+            return
+
+        prev_close = self._prev_close.get(ticker, price)
+        change = price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
+
+        cost_basis = holding.avg_cost * holding.quantity
+        position_value = price * holding.quantity
+        position_pnl = position_value - cost_basis
+        position_pnl_pct = (position_pnl / cost_basis * 100) if cost_basis else 0.0
+
+        update = PriceUpdate(
+            ticker=ticker,
+            price=round(price, 4),
+            change=round(change, 4),
+            change_pct=round(change_pct, 4),
+            position_value=round(position_value, 2),
+            position_pnl=round(position_pnl, 2),
+            position_pnl_pct=round(position_pnl_pct, 4),
+        )
+        await self.broadcast(update.model_dump())

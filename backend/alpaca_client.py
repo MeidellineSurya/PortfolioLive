@@ -33,10 +33,11 @@ from dataclasses import dataclass
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.news import NewsClient
+from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.models.news import News
 from alpaca.data.models.quotes import Quote
-from alpaca.data.requests import NewsRequest
+from alpaca.data.requests import NewsRequest, StockSnapshotRequest
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class AlpacaClient:
         self._secret_key = secret_key
         self._on_quote = on_quote
         self._news_client = NewsClient(api_key, secret_key)
+        self._history_client = StockHistoricalDataClient(api_key, secret_key)
 
         # Captured here (constructed during FastAPI startup, on the app's
         # loop) so quote callbacks running on the stream thread can hand
@@ -171,6 +173,21 @@ class AlpacaClient:
             logger.warning("Alpaca price stream ended, reconnecting in %ss", delay)
             self._stop_event.wait(delay)
             delay = min(delay * 2, RECONNECT_MAX_DELAY_SECONDS)
+
+    # ---- reference data ---------------------------------------------------
+
+    async def get_previous_close(self, ticker: str) -> float | None:
+        """Previous trading day's close, used as the baseline for the
+        ``change``/``change_pct`` fields on price updates. Cheap, one-shot
+        REST call — fetched once when a ticker starts being tracked, not on
+        every tick.
+        """
+        request = StockSnapshotRequest(symbol_or_symbols=ticker, feed=DataFeed.IEX)
+        snapshots = await asyncio.to_thread(self._history_client.get_stock_snapshot, request)
+        snapshot = snapshots.get(ticker)
+        if snapshot is None or snapshot.previous_daily_bar is None:
+            return None
+        return float(snapshot.previous_daily_bar.close)
 
     # ---- news polling ---------------------------------------------------
 
