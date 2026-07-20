@@ -257,3 +257,62 @@ decisions made in that commit — not a changelog of what files were touched.
   Alpaca/Groq credentials aren't in scope here. That end-to-end path still
   needs manual verification against real `.env` values before this is
   trusted in a deployed environment.
+
+---
+
+## Commit 5 — News service with Groq summarisation
+
+**Files:** `backend/news_service.py`, `backend/alpaca_client.py` (`get_tickers` contract), `backend/main.py`, `backend/requirements.txt`
+
+- **`AlpacaClient.start_news_polling`'s `get_tickers` callback became `async`
+  (was a plain sync `Callable[[], list[str]]` in commit 2).** The real
+  ticker source is `PortfolioStore.get_all_holdings`, which is inherently
+  async (it's a Redis call). Commit 2 guessed at the shape of this callback
+  before the real consumer existed; now that `news_service.py` is the thing
+  actually supplying it, the honest fix is changing the contract, not
+  wrapping an async store call in something sync. Verified against the
+  installed SDK/venv that `main.py` still imports and all routes still
+  register after the change.
+
+- **Deduping *broadcasts* is a separate concern from caching *summaries*,
+  and they use different storage with different lifetimes.** Alpaca's news
+  REST endpoint has no "since" cursor — the same handful of recent articles
+  reappear in every 60-second poll until they scroll out of the "latest N"
+  window. Two caches handle two different problems:
+  - `self._broadcast_ids` (in-process `set[int]`, unbounded for the
+    process's lifetime) stops the same article being re-sent to already-
+    connected clients on every poll cycle — without it, the news feed
+    would just repeat itself every minute instead of showing new items.
+  - The Redis-backed summary cache (5-minute TTL, per the spec) exists
+    purely to avoid redundant Groq calls — e.g. the same article
+    mentioning two held tickers, or a backend restart within the TTL
+    window re-encountering an article whose in-memory dedup entry was lost.
+  Conflating the two — e.g. using the Redis TTL cache alone to gate
+  broadcasts — would either re-spam the feed every time the TTL expires
+  (still within the article's "latest N" visibility window) or, if made
+  permanent, would silently disable Groq calls forever for a given article
+  even across intentional cache clears.
+
+- **The Redis connection for summary caching is separate from
+  `PortfolioStore`'s.** `PortfolioStore` never exposed its client, and
+  news-summary caching isn't portfolio state — reusing it would mean either
+  breaking that encapsulation or coupling two unrelated concerns to save
+  one small connection pool. The cost (a second lightweight `redis.asyncio`
+  pool) is worth keeping the modules independent.
+
+- **A failed article (Groq error, network blip) is logged and skipped, not
+  retried, and is *not* added to `_broadcast_ids`.** Since the same article
+  will reappear in the next 60-second poll (no cursor, as above), simply
+  not marking it as broadcast is the retry mechanism — no separate retry
+  loop or backoff needed for this path.
+
+- **`GROQ_MODEL = "llama-3.3-70b-versatile"`**, not `"llama-3.3-70b"` as
+  written in the spec — verified against the installed `groq` 1.5.0 SDK's
+  accepted model literals; Groq's actual model id for Llama 3.3 70B carries
+  the `-versatile` suffix.
+
+- **`groq==1.5.0`, pinned to the exact version whose API was inspected**
+  (constructor signature, `chat.completions.create` params, response
+  shape), same approach as `alpaca-py` in commit 2 — the goal is that
+  every version pin in `requirements.txt` reflects a version this code was
+  actually checked against, not a guess.

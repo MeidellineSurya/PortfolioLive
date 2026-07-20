@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from alpaca_client import AlpacaClient
 from models import Holding, TICKER_RE
+from news_service import NewsService
 from portfolio_store import PortfolioStore
 from websocket_manager import WebSocketManager
 
@@ -36,6 +37,13 @@ async def lifespan(app: FastAPI):
         on_quote=on_quote,
     )
     manager = WebSocketManager(alpaca_client, store)
+    news_service = NewsService(
+        alpaca_client=alpaca_client,
+        portfolio_store=store,
+        ws_manager=manager,
+        groq_api_key=os.environ["GROQ_API_KEY"],
+        redis_url=os.environ["REDIS_URL"],
+    )
 
     app.state.store = store
     app.state.alpaca_client = alpaca_client
@@ -43,6 +51,7 @@ async def lifespan(app: FastAPI):
 
     alpaca_client.start()
     await manager.load_initial_holdings()
+    news_service.start()
 
     yield
 

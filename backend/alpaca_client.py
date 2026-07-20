@@ -48,6 +48,7 @@ RECONNECT_MAX_DELAY_SECONDS = 30
 
 OnQuote = Callable[[str, float], Awaitable[None]]
 OnNewsBatch = Callable[["list[NewsArticle]"], Awaitable[None]]
+GetTickers = Callable[[], Awaitable["list[str]"]]
 
 
 @dataclass(frozen=True)
@@ -191,14 +192,14 @@ class AlpacaClient:
 
     # ---- news polling ---------------------------------------------------
 
-    def start_news_polling(self, get_tickers: Callable[[], "list[str]"], on_batch: OnNewsBatch) -> None:
+    def start_news_polling(self, get_tickers: GetTickers, on_batch: OnNewsBatch) -> None:
         if self._news_task is not None:
             return
         self._news_task = asyncio.create_task(self._poll_news_forever(get_tickers, on_batch))
 
-    async def _poll_news_forever(self, get_tickers: Callable[[], "list[str]"], on_batch: OnNewsBatch) -> None:
+    async def _poll_news_forever(self, get_tickers: GetTickers, on_batch: OnNewsBatch) -> None:
         while True:
-            tickers = get_tickers()
+            tickers = await get_tickers()
             if tickers:
                 try:
                     articles = await self.fetch_news(tickers)
