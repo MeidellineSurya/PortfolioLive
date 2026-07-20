@@ -316,3 +316,67 @@ decisions made in that commit — not a changelog of what files were touched.
   shape), same approach as `alpaca-py` in commit 2 — the goal is that
   every version pin in `requirements.txt` reflects a version this code was
   actually checked against, not a guess.
+
+---
+
+## Commit 6 — Frontend WebSocket hook
+
+**Files:** `frontend/` (scaffolded), `frontend/lib/types.ts`, `frontend/lib/websocket.ts`, `frontend/.env.local.example`
+
+- **Scaffolded with `create-next-app@15`, not `@latest`.** The first attempt
+  used `@latest`, which resolved to Next.js 16.2.10 — `create-next-app`'s
+  `@latest` tracks whatever's newest, and the spec asks for Next.js 15
+  specifically. Deleted and re-ran pinned to `@15`, landing on 15.5.20
+  (React 19.1.0). Worth noting because it would have been an easy thing to
+  not double check — the package.json diff looks identical either way
+  unless you read the version numbers.
+
+- **Removed the default template's `public/*.svg` files** (Next/Vercel/file/
+  globe/window icons) and will replace `app/page.tsx`'s starter content
+  once the dashboard is actually assembled (commit 7+). Left as scaffolding
+  cruft, they'd suggest unfinished work rather than an intentional stub.
+
+- **WebSocket message types (`lib/types.ts`) use the backend's snake_case
+  field names verbatim** (`avg_cost`, `position_pnl_pct`, etc.) instead of
+  the camelCase that's conventional in TypeScript. The backend's
+  `model_dump()` (commit 1) has no alias config, so the wire format is
+  already snake_case; adding a mapping layer to convert it would be a
+  translation step that exists purely for naming-convention purity, with a
+  real cost (one more place a field can be renamed on one side and missed
+  on the other) and no functional benefit.
+
+- **`useWebSocket`'s reconnect backoff is tracked in a `ref`, not `state`.**
+  The delay value needs to survive across `onclose` handler closures and
+  double between attempts, but changing it should never itself trigger a
+  re-render — using `useState` for it would cause an extra render on every
+  reconnect attempt for no reason. `readyState` and `lastMessage` *are*
+  state, since the UI needs to re-render when they change.
+
+- **A `boolean` ref (`unmountedRef`), not a check on `reconnectTimeoutRef`,
+  distinguishes "cleanup closed this" from "the server dropped us."**
+  Without it, the cleanup function's `wsRef.current?.close()` call would
+  itself fire `onclose`, which would then schedule a reconnect *after* the
+  component already unmounted (or after the `url` dependency changed and
+  a new effect run already started a fresh connection) — a leaked timer
+  and, in the url-change case, two competing WebSocket connections.
+
+- **`onerror` closes the socket and lets `onclose` own all reconnect
+  scheduling, rather than scheduling a reconnect from both handlers.** The
+  browser WebSocket spec guarantees `close` fires after `error`; scheduling
+  from both would double the reconnect attempt (and double-apply the
+  backoff multiplier) on every network-level failure.
+
+- **Verification:** `npx tsc --noEmit` and `npx eslint` both pass clean on
+  the new files. Did not yet run the dev server / exercise this in a
+  browser — there's no page wired up to actually open a connection until
+  the dashboard (`page.tsx`) is assembled in the next few commits; testing
+  this hook in isolation against a running backend happens once there's a
+  UI to watch it in.
+
+- **Patched `create-next-app`'s generated `frontend/.gitignore`**: its
+  default `.env*` pattern silently swallowed `.env.local.example` too (it's
+  a glob, not an exact match on `.env`/`.env.local`), which would have
+  meant the example file — added specifically so a new developer knows what
+  env vars to set — never actually made it into git. Added a `!.env*.example`
+  negation line. Caught by checking `git status` after staging rather than
+  assuming `git add` picked up everything intended.
