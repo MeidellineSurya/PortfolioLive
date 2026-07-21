@@ -1221,3 +1221,54 @@ turned into a broadcast and forgotten.
   tool available) — the crossing-detection logic itself was verified
   through real production code in commit 15, not re-verified here at the
   UI layer.
+
+---
+
+## Commit 17 — Fired-alert history + per-stock analytics charts (frontend)
+
+**Files:** `frontend/app/components/PortfolioTable.tsx`, `frontend/app/analytics/page.tsx`
+
+User-reported gap, found while testing commit 16: a triggered alert
+disappeared from the UI entirely (`PortfolioTable` filtered to
+`!alert.triggered`), so missing the toast — e.g. tab closed when it fired
+— meant no record anywhere that it had happened at all.
+
+- **Fired alerts are now shown, not hidden, distinguished by a muted `✓`
+  chip vs. the active `🔔` chip** — both still removable via the same `×`
+  (deleting an alert was never conditional on `triggered` on the backend,
+  so no backend change was needed here). Kept as a flat list rather than
+  splitting into two visually separate groups per ticker — with typically
+  one or two alerts per holding, a second grouping layer would be
+  structure for structure's sake.
+
+- **Per-stock charts required no backend change at all.** Each
+  `PortfolioSnapshot` in `AnalyticsResponse.history` already carries
+  per-ticker `{price, value, pnl_pct}` (commit 15, built for best/worst
+  performer) — plotting one ticker's `pnl_pct` over time is just filtering
+  and mapping data already being sent, not a new data requirement.
+
+- **"Which tickers get a chart" is read from the *latest* snapshot's
+  holdings, not the union of every ticker that ever appeared in the
+  30-day window.** Consistent with the rest of the dashboard (the
+  Holdings table only ever shows current holdings) — a ticker sold last
+  week doesn't get a chart here either, for the same reason it doesn't
+  get a row in the table.
+
+- **Per-ticker line color is the *current* `pnl_pct` sign** (last point in
+  that ticker's series), not the trend-within-window logic
+  `PriceSparkline` deliberately uses (commit 10). This chart *is* a P&L%
+  chart — "is this position up or down right now" is exactly what it's
+  showing, so coloring by anything else would be the wrong answer for
+  this specific chart, unlike the sparkline (which is about recent price
+  movement, not overall position performance, and says so explicitly).
+
+- **Verification:** `tsc`/`eslint` clean, production build succeeds.
+  Seeded 5 realistic synthetic snapshots directly into the real backend's
+  Redis (same approach as commit 15's isolated verification, but this
+  time against the actual shared Redis instance the running Docker
+  container reads from) and confirmed via `curl` that `GET /analytics`
+  returns them with correct per-ticker `pnl_pct` data. Restarted the
+  frontend dev server against the live backend and confirmed the
+  `/analytics` route still compiles and serves 200 with the new section
+  present in the component tree. Did not visually confirm the rendered
+  charts in a browser.

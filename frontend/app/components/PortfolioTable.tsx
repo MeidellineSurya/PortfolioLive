@@ -44,7 +44,7 @@ export default function PortfolioTable({ rows, alerts, onRemove, onSetAlert, onD
             <PortfolioRowView
               key={row.ticker}
               row={row}
-              alerts={alerts.filter((alert) => alert.ticker === row.ticker && !alert.triggered)}
+              alerts={alerts.filter((alert) => alert.ticker === row.ticker)}
               onRemove={onRemove}
               onSetAlert={onSetAlert}
               onDeleteAlert={onDeleteAlert}
@@ -116,13 +116,19 @@ function PortfolioRowView({
           {alerts.map((alert) => (
             <span
               key={alert.id}
-              className="flex items-center gap-1 rounded bg-neutral-100 px-1.5 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
+              title={alert.triggered ? "Already fired" : "Watching for this price"}
+              className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+                alert.triggered
+                  ? "bg-neutral-50 text-neutral-400 dark:bg-neutral-900 dark:text-neutral-500"
+                  : "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
+              }`}
             >
+              <span aria-hidden>{alert.triggered ? "✓" : "🔔"}</span>
               {formatCurrency(alert.target_price)}
               <button
                 type="button"
                 onClick={() => onDeleteAlert(alert.id)}
-                aria-label={`Remove alert for ${row.ticker} at ${formatCurrency(alert.target_price)}`}
+                aria-label={`Remove ${alert.triggered ? "fired" : "pending"} alert for ${row.ticker} at ${formatCurrency(alert.target_price)}`}
                 className="text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
               >
                 ×
