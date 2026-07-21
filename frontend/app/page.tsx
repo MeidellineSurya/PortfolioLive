@@ -2,6 +2,7 @@
 
 import { useEffect, useReducer, useState } from "react";
 
+import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
 import { useWebSocket } from "@/lib/websocket";
@@ -16,6 +17,7 @@ type PortfolioState = Record<string, PortfolioRow>;
 
 type PortfolioAction =
   | { type: "SET_HOLDINGS"; holdings: Holding[] }
+  | { type: "ADD_HOLDING"; holding: Holding }
   | { type: "REMOVE_HOLDING"; ticker: string }
   | { type: "PRICE_UPDATE"; update: PriceUpdate };
 
@@ -30,6 +32,13 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
         next[holding.ticker] = { ...state[holding.ticker], ...holding };
       }
       return next;
+    }
+    case "ADD_HOLDING": {
+      // Upsert, not insert-only — mirrors POST /portfolio/add's own
+      // semantics (main.py, commit 4): re-adding an existing ticker
+      // updates its quantity/avg_cost rather than being rejected.
+      const existing = state[action.holding.ticker];
+      return { ...state, [action.holding.ticker]: { ...existing, ...action.holding } };
     }
     case "REMOVE_HOLDING": {
       if (!(action.ticker in state)) return state;
@@ -81,6 +90,23 @@ export default function Home() {
     }
   }, [lastMessage]);
 
+  function handleAdd(holding: Holding) {
+    dispatch({ type: "ADD_HOLDING", holding });
+    fetch(`${API_URL}/portfolio/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(holding),
+    })
+      .then((res) => {
+        // Unlike a failed DELETE (commit 7), a failed ADD leaves a row
+        // that will never receive price updates — it's not just stale,
+        // it's permanently frozen at "—". Worth rolling back explicitly
+        // rather than waiting for a refetch that may never come.
+        if (!res.ok) dispatch({ type: "REMOVE_HOLDING", ticker: holding.ticker });
+      })
+      .catch(() => dispatch({ type: "REMOVE_HOLDING", ticker: holding.ticker }));
+  }
+
   async function handleRemove(ticker: string) {
     dispatch({ type: "REMOVE_HOLDING", ticker });
     try {
@@ -129,6 +155,7 @@ export default function Home() {
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
         <section>
           <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Holdings</h2>
+          <AddTickerForm onAdd={handleAdd} />
           <PortfolioTable rows={rows} onRemove={handleRemove} />
         </section>
 

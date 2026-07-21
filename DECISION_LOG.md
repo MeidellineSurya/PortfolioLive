@@ -688,3 +688,58 @@ frontend work.
   `news_update` messages broadcast correctly over `/ws` with the exact
   shape `NewsFeed` expects, via a raw WebSocket test script rather than
   this UI.
+
+---
+
+## Commit 9 — Add ticker form (remove was already commit 7)
+
+**Files:** `frontend/app/components/AddTickerForm.tsx`, `frontend/app/page.tsx`
+
+- **"Add/remove ticker form" in the implementation order turned out to be
+  mostly already done.** The spec's per-component breakdown puts "Remove
+  button per row" under `PortfolioTable.tsx`, not `AddTickerForm.tsx` — so
+  remove was implemented back in commit 7 alongside the table. This commit
+  is really just "add," despite the step's name in the implementation
+  order.
+
+- **Client-side ticker validation duplicates `TICKER_RE` from
+  `backend/models.py`** (`^[A-Z]{1,5}$`) rather than only relying on the
+  backend's rejection. A round trip to find out "AAPL2" is invalid is a
+  worse experience than an inline message on submit — this is UX,
+  not a substitute for the backend's validation, which still runs
+  regardless of what the client checked.
+
+- **`onAdd` is optimistic and rolls back on failure, unlike `onRemove`
+  (commit 7), which doesn't.** The two failure modes aren't symmetric: a
+  failed `DELETE` just means an already-gone-from-the-UI row silently
+  comes back on the next refetch — mildly stale, self-correcting. A failed
+  `POST` that isn't rolled back leaves a row that will *never* receive a
+  price tick (the backend never subscribed it to anything), permanently
+  stuck at the "—" placeholders from commit 7 — indistinguishable from
+  "this ticker just doesn't have data yet" to the user, with no future
+  event that would ever fix it. That asymmetry is why `handleAdd` rolls
+  back explicitly (dispatches `REMOVE_HOLDING` for the just-added ticker)
+  on a non-OK response or a network failure, while `handleRemove` doesn't
+  bother.
+
+- **`ADD_HOLDING` in the portfolio reducer is an upsert** (`{ ...existing,
+  ...action.holding }`), deliberately matching `POST /portfolio/add`'s own
+  upsert semantics documented in commit 4 — re-adding a ticker already in
+  the table updates its quantity/avg cost in place rather than needing
+  special-case handling for "this ticker already exists."
+
+- **Verification — this time against the real backend, not just SSR
+  structure:** started the backend (real Redis/Alpaca/Groq, same setup as
+  commit 7a) and the frontend together, pointed at each other via a
+  temporary `.env.local`. Confirmed `GET /portfolio` still returned the
+  `AAPL` holding surviving from earlier live testing. Sent the *exact*
+  request shape `AddTickerForm`'s `onAdd` produces
+  (`POST /portfolio/add` with `{ticker, quantity, avg_cost}`) directly via
+  `curl` for a new ticker (`MSFT`) — got `201`, confirmed it appeared in a
+  follow-up `GET /portfolio`, then `DELETE`d it to leave the portfolio
+  clean. `tsc`/`eslint` clean, production build still succeeds. Not
+  verified: the actual optimistic-then-rollback UI transition and the
+  client-side validation error message rendering — both are plain React
+  state changes with no complex logic, but "renders correctly in a
+  browser" specifically still wasn't observed, for the same
+  no-headless-browser reason as commits 7 and 8.
