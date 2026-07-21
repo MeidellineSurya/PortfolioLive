@@ -4,13 +4,14 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from alpaca_client import AlpacaClient
-from models import TICKER_RE, Holding
+from models import TICKER_RE, Holding, NewsItem
 from news_service import NewsService
 from portfolio_store import PortfolioStore
 from websocket_manager import WebSocketManager
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.alpaca_client = alpaca_client
     app.state.ws_manager = manager
+    app.state.news_service = news_service
 
     alpaca_client.start()
     try:
@@ -120,6 +122,22 @@ async def remove_holding(ticker: str) -> None:
 
     await store.remove_holding(ticker)
     await app.state.ws_manager.untrack_ticker(ticker)
+
+
+@app.get("/news/{ticker}")
+async def get_more_news(ticker: str, before: datetime | None = None, limit: int = 5) -> list[NewsItem]:
+    """On-demand "load more" past what the 60s poll cycle already
+    broadcast (news_service.py caps that at 5 per ticker per cycle).
+    ``before`` is the published_at of the oldest item the client already
+    has; omit it to get the most recent items not yet seen.
+    """
+    ticker = ticker.strip().upper()
+    if not TICKER_RE.match(ticker):
+        raise HTTPException(status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z)")
+    limit = max(1, min(limit, 20))
+
+    news_service: NewsService = app.state.news_service
+    return await news_service.get_more_news(ticker, before, limit)
 
 
 @app.websocket("/ws")

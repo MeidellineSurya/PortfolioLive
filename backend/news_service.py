@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime
 
 import redis.asyncio as redis
 from groq import AsyncGroq
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 NEWS_ITEMS_PER_TICKER = 5
 SUMMARY_CACHE_TTL_SECONDS = 300
 GROQ_MODEL = "llama-3.3-70b-versatile"
+# "Load more" fetches this many extra candidates beyond what the caller
+# asked for, since Alpaca's `end` filter is inclusive (see get_more_news)
+# and some of what comes back will already be in `_broadcast_ids`.
+LOAD_MORE_FETCH_MULTIPLIER = 3
 
 SYSTEM_PROMPT = (
     "You summarise financial news in exactly one sentence under 20 words. "
@@ -85,15 +90,48 @@ class NewsService:
                     self._broadcast_ids.add(article.id)
 
     async def _process_article(self, ticker: str, article: NewsArticle) -> None:
+        item = await self._build_news_item(ticker, article)
+        await self._ws_manager.broadcast(item.model_dump())
+
+    async def _build_news_item(self, ticker: str, article: NewsArticle) -> NewsItem:
         ai_summary = await self._summarise_cached(article)
-        item = NewsItem(
+        return NewsItem(
             ticker=ticker,
             headline=article.headline,
             ai_summary=ai_summary,
             url=article.url,
             published_at=article.published_at,
         )
-        await self._ws_manager.broadcast(item.model_dump())
+
+    async def get_more_news(self, ticker: str, before: datetime | None, limit: int) -> list[NewsItem]:
+        """On-demand "load more" for a single ticker, past whatever the 60s
+        poll cycle has already broadcast for it.
+
+        Alpaca's ``end`` filter is inclusive — passing the oldest
+        currently-displayed article's timestamp back as ``end`` would
+        return that same article again as the first result. Rather than
+        subtracting an epsilon from the timestamp (fragile: depends on
+        Alpaca's actual timestamp precision, which isn't documented),
+        this over-fetches and filters out anything already in
+        `_broadcast_ids` — the same set that already prevents the poll
+        cycle from re-broadcasting an article, reused here for exactly the
+        same purpose.
+        """
+        candidates = await self._alpaca.fetch_news(
+            [ticker], limit=limit * LOAD_MORE_FETCH_MULTIPLIER, end=before
+        )
+        fresh = [article for article in candidates if article.id not in self._broadcast_ids][:limit]
+
+        items: list[NewsItem] = []
+        for article in fresh:
+            item = await self._build_news_item(ticker, article)
+            items.append(item)
+            # Marked here, not just left to the next poll cycle: without
+            # this, the very next 60s poll could re-broadcast an article
+            # the user just explicitly loaded, appearing as an unexpected
+            # duplicate at the top of the live feed.
+            self._broadcast_ids.add(article.id)
+        return items
 
     async def _summarise_cached(self, article: NewsArticle) -> str:
         cache_key = f"news_summary:{article.id}"

@@ -891,3 +891,56 @@ frontend work.
   catch any TOML syntax error before it'd surface as a Railway deploy
   failure. All test containers and the test image were removed after
   verification — nothing left running.
+
+---
+
+## Commit 12 — "Load more" news endpoint (backend)
+
+**Files:** `backend/main.py`, `backend/news_service.py`, `backend/alpaca_client.py`
+
+User-requested feature, discovered live while testing: the news feed only
+ever shows the 5 articles per ticker that the 60s poll cycle already
+broadcast (`NEWS_ITEMS_PER_TICKER`, commit 5) — there was no way to see
+anything older on demand.
+
+- **Alpaca's `end` filter on the news endpoint is inclusive — verified
+  live against the real API, not assumed.** Fetched 3 articles, took the
+  oldest one's exact `created_at`, passed it back as `end` on a follow-up
+  request: the same article came back again as the first result. This
+  matters directly for pagination: naively passing "the oldest article
+  currently shown" as the cursor for "give me older ones" would return
+  that same article as a duplicate on every "load more" click.
+
+- **Fixed by reusing `_broadcast_ids` (commit 8's dedup set) rather than
+  fudging the timestamp (e.g. subtracting a second).** A timestamp
+  epsilon depends on Alpaca's actual timestamp precision, which isn't
+  documented and isn't worth relying on. Instead, `get_more_news`
+  over-fetches (`limit * 3`) with the inclusive `end`, then filters out
+  anything whose id is already in `_broadcast_ids` before taking the
+  first `limit` — the same mechanism that already stops the 60s poll from
+  re-broadcasting an article gets reused here for an on-demand fetch,
+  rather than inventing a second, timestamp-based dedup strategy. Verified
+  live across two sequential "load more" calls: the boundary article from
+  the first page did not reappear in the second.
+
+- **Articles returned by "load more" get added to `_broadcast_ids`
+  immediately**, not left for the next poll cycle to (maybe) pick up.
+  Without this, the very next 60s poll could re-broadcast an article the
+  user just explicitly paged to, appearing as a confusing duplicate back
+  at the *top* of the live feed a few seconds after they saw it at the
+  bottom.
+
+- **`GET /news/{ticker}` is a plain request/response, not something that
+  goes through `WebSocketManager.broadcast`.** This is one client asking
+  for more of *their own* view's history — pushing it to every connected
+  client the way live news updates work would mean everyone's feed
+  jumping around because one person clicked "load more" on a ticker they
+  might not even be looking at.
+
+- **No unit test added for `get_more_news`.** It's tightly coupled to
+  three external services (Alpaca REST, Groq, Redis) — testing it
+  meaningfully would mean mocking all three, which is real scope beyond
+  what a quick feature addition warrants. Verified live instead (see
+  above): real API calls, real pagination behavior, real dedup
+  correctness. Same call made in commit 7b about integration tests
+  applies here.

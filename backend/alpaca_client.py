@@ -30,6 +30,7 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.news import NewsClient
@@ -217,13 +218,21 @@ class AlpacaClient:
                 logger.exception("news polling cycle failed")
             await asyncio.sleep(NEWS_POLL_INTERVAL_SECONDS)
 
-    async def fetch_news(self, tickers: "list[str]", limit: int = NEWS_FETCH_LIMIT) -> "list[NewsArticle]":
+    async def fetch_news(
+        self, tickers: "list[str]", limit: int = NEWS_FETCH_LIMIT, end: datetime | None = None
+    ) -> "list[NewsArticle]":
         """One-shot REST fetch of the latest news across ``tickers``.
+
+        ``end``, when given, fetches articles published at or before that
+        timestamp (Alpaca's own semantics — verified live: it's inclusive,
+        not exclusive) rather than the current latest. Used for "load
+        more" pagination (news_service.py); the regular 60s poll never
+        passes it.
 
         ``NewsClient.get_news`` is a blocking `requests` call, so it's
         pushed to a worker thread to avoid stalling the event loop.
         """
-        request = NewsRequest(symbols=",".join(tickers), limit=limit, exclude_contentless=True)
+        request = NewsRequest(symbols=",".join(tickers), limit=limit, exclude_contentless=True, end=end)
         news_set = await asyncio.to_thread(self._news_client.get_news, request)
         return [self._to_article(item) for item in news_set.data["news"]]
 
