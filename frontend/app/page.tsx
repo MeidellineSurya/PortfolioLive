@@ -1,12 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useReducer, useState } from "react";
 
 import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
+import ToastStack, { type ToastMessage } from "./components/Toast";
 import { useWebSocket } from "@/lib/websocket";
-import type { Holding, NewsItem, PortfolioRow, PriceUpdate } from "@/lib/types";
+import type { Holding, NewsItem, PortfolioRow, PriceAlert, PriceUpdate } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -65,6 +67,8 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
 export default function Home() {
   const [portfolio, dispatch] = useReducer(portfolioReducer, {});
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [alerts, setAlerts] = useState<PriceAlert[]>([]);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const { lastMessage } = useWebSocket(WS_URL);
 
   useEffect(() => {
@@ -84,11 +88,37 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_URL}/alerts`)
+      .then((res) => res.json())
+      .then((data: PriceAlert[]) => {
+        if (!cancelled) setAlerts(data);
+      })
+      .catch(() => {
+        // Same as the portfolio fetch above — alerts just stay empty
+        // until the next successful load.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!lastMessage) return;
     if (lastMessage.type === "price_update") {
       dispatch({ type: "PRICE_UPDATE", update: lastMessage });
     } else if (lastMessage.type === "news_update") {
       setNews((prev) => [lastMessage, ...prev].slice(0, MAX_NEWS_ITEMS));
+    } else if (lastMessage.type === "price_alert") {
+      const { id, ticker, target_price, price, direction } = lastMessage;
+      setAlerts((prev) => prev.map((alert) => (alert.id === id ? { ...alert, triggered: true } : alert)));
+      setToasts((prev) => [
+        ...prev,
+        {
+          id,
+          text: `${ticker} crossed ${direction} ${formatCurrency(target_price)} (now ${formatCurrency(price)})`,
+        },
+      ]);
     }
   }, [lastMessage]);
 
@@ -111,11 +141,42 @@ export default function Home() {
 
   async function handleRemove(ticker: string) {
     dispatch({ type: "REMOVE_HOLDING", ticker });
+    setAlerts((prev) => prev.filter((alert) => alert.ticker !== ticker));
     try {
       await fetch(`${API_URL}/portfolio/${ticker}`, { method: "DELETE" });
     } catch {
       // The optimistic removal already updated the UI; a failed DELETE
       // will just mean the ticker reappears on the next full refetch.
+    }
+  }
+
+  async function handleSetAlert(ticker: string, targetPrice: number) {
+    try {
+      const res = await fetch(`${API_URL}/alerts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker, target_price: targetPrice }),
+      });
+      if (!res.ok) return;
+      const alert: PriceAlert = await res.json();
+      // Not optimistic like handleAdd/handleRemove: the backend generates
+      // the alert's id (a uuid4), so there's nothing valid to render
+      // until the response comes back — an optimistic placeholder would
+      // need a fake id that then has to be reconciled with the real one.
+      setAlerts((prev) => [...prev, alert]);
+    } catch {
+      // Nothing was added to local state, so nothing to roll back.
+    }
+  }
+
+  async function handleDeleteAlert(id: string) {
+    setAlerts((prev) => prev.filter((alert) => alert.id !== id));
+    try {
+      await fetch(`${API_URL}/alerts/${id}`, { method: "DELETE" });
+    } catch {
+      // Optimistic removal already updated the UI; a failed DELETE just
+      // means it reappears on the next alerts refetch (there isn't one
+      // on a timer today — same accepted tradeoff as handleRemove).
     }
   }
 
@@ -128,7 +189,15 @@ export default function Home() {
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="text-2xl font-semibold">PortfolioLive</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">PortfolioLive</h1>
+          <Link
+            href="/analytics"
+            className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300"
+          >
+            Analytics →
+          </Link>
+        </div>
         <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
           15-minute delayed prices via Alpaca (IEX feed, free tier).
         </p>
@@ -158,7 +227,13 @@ export default function Home() {
         <section>
           <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Holdings</h2>
           <AddTickerForm onAdd={handleAdd} />
-          <PortfolioTable rows={rows} onRemove={handleRemove} />
+          <PortfolioTable
+            rows={rows}
+            alerts={alerts}
+            onRemove={handleRemove}
+            onSetAlert={handleSetAlert}
+            onDeleteAlert={handleDeleteAlert}
+          />
         </section>
 
         <aside>
@@ -166,6 +241,8 @@ export default function Home() {
           <NewsFeed items={news} tickers={rows.map((row) => row.ticker)} />
         </aside>
       </div>
+
+      <ToastStack toasts={toasts} onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))} />
     </div>
   );
 }

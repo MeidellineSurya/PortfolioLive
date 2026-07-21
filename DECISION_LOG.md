@@ -1153,3 +1153,71 @@ turned into a broadcast and forgotten.
   empty state (`history: []`, both performers `null`) when no snapshot
   yet exists — which is what actually happened in the live container,
   since `last_prices` was empty the whole time the market was closed.
+
+---
+
+## Commit 16 — Price alerts + portfolio analytics (frontend)
+
+**Files:** `frontend/app/components/Toast.tsx`, `frontend/app/components/PortfolioTable.tsx`, `frontend/app/page.tsx`, `frontend/app/analytics/page.tsx`, `frontend/lib/types.ts`
+
+- **Alert-setting UI is inline per row in `PortfolioTable`, not a modal or
+  a separate page.** The user's own framing was "notify me when AAPL
+  hits $200" — a per-ticker action taken right where that ticker already
+  lives on screen. A modal or dedicated alerts page would add navigation
+  for something that's naturally a one-line "ticker, price, go."
+
+- **Alert creation is *not* optimistic**, unlike `handleAdd`/`handleRemove`
+  (commits 7/9). Those mutate client-generated or already-known state; an
+  alert's `id` is a server-generated UUID, so there's nothing valid to
+  render until the response comes back. An optimistic version would need
+  a fake placeholder id that then has to be reconciled with the real one
+  once the response arrives — more moving parts for a form submission
+  that's already fast (no external API call in the request path, just a
+  Redis write).
+
+- **`ToastStack`/`ToastItem` split so each toast owns its own dismiss
+  timer**, rather than `page.tsx` tracking a timer per toast in a list it
+  doesn't otherwise need timing details about. `page.tsx` just appends to
+  an array on a `price_alert` message and removes by id on dismiss — the
+  "how long has this been visible" concern lives entirely inside the
+  component displaying it.
+
+- **A triggered alert is marked `triggered: true` in local state on
+  receipt of the `price_alert` WS message, not removed outright.**
+  `PortfolioTable` already filters to `!alert.triggered` when deciding
+  which chips to show per ticker, so marking (rather than deleting)
+  produces the same visible result while keeping the alert's history
+  available if something later wants to show "this fired" rather than
+  just "this is gone."
+
+- **The analytics page charts `total_pnl_pct` over time, not raw
+  `total_value`.** Percentage return is comparable across days regardless
+  of how much was added to or removed from the portfolio in between (an
+  `ADD_HOLDING` mid-week would make a raw-value chart jump for a reason
+  that has nothing to do with performance); percent P&L stays meaningful
+  regardless.
+
+- **"Best/worst performer" renders its own distinct empty state** ("not
+  enough history — needs at least two snapshots spanning 7 days") rather
+  than reusing the chart's "not enough history yet" message. The two
+  sections can genuinely be in different states at the same time — a
+  30-day chart can have plenty of points while the *7-day* window
+  specifically (a fixed sub-range, per commit 15) doesn't yet have two
+  snapshots to compare — so collapsing them into one message would
+  sometimes describe the wrong section.
+
+- **Verification:** `tsc`/`eslint` clean, production build succeeds with
+  both routes (`/` and `/analytics`) generated. Rebuilt and ran the real
+  Docker backend, started the frontend against it, and confirmed via SSR
+  that both pages compile and render their correct initial states (empty
+  portfolio dashboard, analytics "Loading…") with no runtime errors.
+  Exercised the exact requests each new UI action produces directly
+  against the live backend: created an alert via the same
+  `POST /alerts` body `handleSetAlert` sends, deleted it via the same
+  `DELETE /alerts/{id}` `handleDeleteAlert` sends, and confirmed
+  `GET /analytics` returns the shape `AnalyticsResponse` expects. As with
+  every frontend commit this session, didn't visually click through the
+  toast/alert-chip/chart UI in an actual browser (no headless browser
+  tool available) — the crossing-detection logic itself was verified
+  through real production code in commit 15, not re-verified here at the
+  UI layer.

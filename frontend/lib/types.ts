@@ -30,7 +30,50 @@ export type NewsItem = {
   published_at: string;
 };
 
-export type WSMessage = PriceUpdate | NewsItem;
+export type PriceAlertTriggered = {
+  type: "price_alert";
+  id: string;
+  ticker: string;
+  target_price: number;
+  price: number;
+  direction: "above" | "below";
+};
+
+export type WSMessage = PriceUpdate | NewsItem | PriceAlertTriggered;
+
+export type PriceAlert = {
+  id: string;
+  ticker: string;
+  target_price: number;
+  triggered: boolean;
+};
+
+export type HoldingSnapshot = {
+  price: number;
+  value: number;
+  pnl_pct: number;
+};
+
+export type PortfolioSnapshot = {
+  timestamp: string;
+  total_value: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  holdings: Record<string, HoldingSnapshot>;
+};
+
+export type PerformanceEntry = {
+  ticker: string;
+  change_pct: number;
+};
+
+export type AnalyticsResponse = {
+  total_pnl: number;
+  total_pnl_pct: number;
+  history: PortfolioSnapshot[];
+  best_performer_7d: PerformanceEntry | null;
+  worst_performer_7d: PerformanceEntry | null;
+};
 
 // A holding merged with whatever live price data has arrived for it so
 // far. The price fields are optional because a holding exists in the
