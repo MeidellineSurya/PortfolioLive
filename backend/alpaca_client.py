@@ -199,14 +199,22 @@ class AlpacaClient:
 
     async def _poll_news_forever(self, get_tickers: GetTickers, on_batch: OnNewsBatch) -> None:
         while True:
-            tickers = await get_tickers()
-            if tickers:
-                try:
+            try:
+                tickers = await get_tickers()
+                logger.info("news poll cycle: %d ticker(s)", len(tickers))
+                if tickers:
                     articles = await self.fetch_news(tickers)
+                    logger.info("news poll cycle: fetched %d article(s)", len(articles))
                     if articles:
                         await on_batch(articles)
-                except Exception:
-                    logger.exception("news polling cycle failed")
+            except Exception:
+                # Must not escape this loop: an asyncio.Task's exception is
+                # only surfaced when something awaits/retrieves it or the
+                # Task is garbage collected. self._news_task holds a
+                # permanent reference, so an uncaught exception here would
+                # kill polling forever with no visible error at all — not
+                # even a log line — rather than a loud crash.
+                logger.exception("news polling cycle failed")
             await asyncio.sleep(NEWS_POLL_INTERVAL_SECONDS)
 
     async def fetch_news(self, tickers: "list[str]", limit: int = NEWS_FETCH_LIMIT) -> "list[NewsArticle]":

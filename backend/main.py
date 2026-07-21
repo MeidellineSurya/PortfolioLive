@@ -1,6 +1,7 @@
 """FastAPI app entry point: REST routes + the /ws endpoint."""
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -9,12 +10,24 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from alpaca_client import AlpacaClient
-from models import Holding, TICKER_RE
+from models import TICKER_RE, Holding
 from news_service import NewsService
 from portfolio_store import PortfolioStore
 from websocket_manager import WebSocketManager
 
 load_dotenv()
+
+# Without this, every logger.info/logger.exception call in this codebase
+# (alpaca_client.py, websocket_manager.py, news_service.py) is invisible:
+# with no handler configured anywhere in the chain, Python only prints
+# WARNING+ via its "handler of last resort", and even that has no
+# timestamps or module names. This is operationally important for a
+# long-running background process — the price-stream thread and news
+# poller both run unattended and need to be debuggable from logs alone.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 MAX_HOLDINGS = 50
 
@@ -50,13 +63,18 @@ async def lifespan(app: FastAPI):
     app.state.ws_manager = manager
 
     alpaca_client.start()
-    await manager.load_initial_holdings()
-    news_service.start()
-
-    yield
-
-    await alpaca_client.stop()
-    await store.close()
+    try:
+        await manager.load_initial_holdings()
+        news_service.start()
+        yield
+    finally:
+        # Alpaca allows exactly one active stream connection per account —
+        # if anything after start() (Redis, news setup) raises, skipping
+        # this leaves that connection open with nothing left to close it,
+        # locking out every subsequent start until Alpaca's own server-side
+        # timeout eventually notices the client is gone.
+        await alpaca_client.stop()
+        await store.close()
 
 
 app = FastAPI(title="PortfolioLive API", lifespan=lifespan)
@@ -90,7 +108,7 @@ async def add_holding(holding: Holding) -> Holding:
     return holding
 
 
-@app.delete("/portfolio/{ticker}", status_code=204)
+@app.delete("/portfolio/{ticker}", status_code=204, response_model=None)
 async def remove_holding(ticker: str) -> None:
     ticker = ticker.strip().upper()
     if not TICKER_RE.match(ticker):

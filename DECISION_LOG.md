@@ -456,3 +456,99 @@ decisions made in that commit — not a changelog of what files were touched.
   browser tool was available in this environment — so light/dark styling
   and exact layout were verified by reading the rendered HTML/Tailwind
   classes, not by eye.
+
+---
+
+## Commit 7a — Fixes found running the backend live end-to-end
+
+**Files:** `backend/main.py`, `backend/alpaca_client.py`
+
+Running the backend against real Redis, Alpaca, and Groq credentials (at
+the user's request, to test the frontend against live data) surfaced three
+real problems that no amount of import-checking or isolated unit-level
+testing had caught. Recorded here as their own commit since they're bug
+fixes discovered through live verification, not part of the Step 7
+frontend work.
+
+- **`DELETE /portfolio/{ticker}` crashed the app at import time.**
+  `async def remove_holding(ticker: str) -> None:` combined with
+  `status_code=204` trips a real FastAPI assertion
+  (`AssertionError: Status code 204 must not have a response body`),
+  because FastAPI infers `response_model` from a bare `-> None` return
+  annotation as "the response model is `NoneType`" — a real Pydantic model
+  it tries to validate against — which is a different thing from "there is
+  no response model," and 204 requires the latter. Every earlier `import
+  main` smoke check (commits 4, 5) used an ad-hoc scratch venv with
+  whatever `fastapi` version `pip install fastapi` resolved to that day;
+  the actual pinned `fastapi==0.115.4` from `requirements.txt` hit this
+  assertion the first time the app was run for real. Fixed by passing
+  `response_model=None` explicitly in the decorator. **Lesson applied
+  here:** version-pinned smoke tests aren't the same as running the pinned
+  versions — worth remembering for future backend changes.
+
+- **An unhandled exception in the news-polling loop could kill it forever,
+  silently.** In `AlpacaClient._poll_news_forever`, the `try/except` only
+  wrapped `fetch_news`/`on_batch`, not `await get_tickers()`. If that call
+  ever raised, the coroutine backing `self._news_task` would die — and
+  because `self._news_task` holds a permanent strong reference to the
+  `Task`, Python's "exception was never retrieved" warning (which only
+  fires on garbage collection) would never surface either. The failure
+  mode is a background task that's dead but shows zero evidence of it: no
+  crash, no log line, nothing — indistinguishable from "just hasn't found
+  anything to broadcast yet" from the outside. This is exactly what made it
+  hard to diagnose live: everything *looked* like a working-but-quiet app
+  for several minutes before isolated reproduction of `fetch_news` and
+  `NewsService._handle_batch` (both worked perfectly standalone) narrowed
+  it down to something specific to the long-running task's error handling.
+  Fixed by wrapping the entire loop body in the `try/except`, so any
+  failure is logged and the loop keeps running on the next 60s tick.
+
+- **`main.py`'s `lifespan` didn't guarantee `alpaca_client.stop()` runs if
+  startup fails between `alpaca_client.start()` and `yield`.** Directly
+  observed this live: an earlier test run failed at
+  `manager.load_initial_holdings()` (Redis was down at that moment), which
+  happens *after* `alpaca_client.start()` already opened a real Alpaca
+  stream connection on a daemon thread. Because the exception happened
+  before `yield`, the shutdown code after it — including
+  `alpaca_client.stop()` — never ran; uvicorn just aborted startup, and the
+  daemon thread died with the process without a clean WebSocket close.
+  Alpaca allows exactly one active stream connection per account, and the
+  next several backend restarts all failed with `"connection limit
+  exceeded"` until whatever server-side detection Alpaca uses eventually
+  timed out the orphaned connection — several minutes of being locked out
+  of testing entirely. Fixed by wrapping `load_initial_holdings()` /
+  `news_service.start()` / `yield` in a `try/finally` so cleanup always
+  runs once the stream has been started, regardless of what fails after.
+
+- **Added `logging.basicConfig(...)` in `main.py`.** There was no logging
+  configuration anywhere in the app. With no handler attached anywhere in
+  the logger hierarchy, Python's default behavior only prints WARNING+ via
+  its "handler of last resort," and even that has no timestamps or module
+  names — every `logger.info` call already written across `alpaca_client.py`,
+  `websocket_manager.py`, and `news_service.py` (e.g. "starting Alpaca
+  price stream") was completely invisible. This isn't just a debugging
+  convenience: a background process managing a persistent WebSocket
+  connection and a 60-second poll loop needs to be observable from its
+  logs alone once it's actually running unattended (Railway, commit 11)
+  — silence on stdout shouldn't be the only signal available for "is this
+  working."
+
+- **Added a temporary-turned-permanent pair of INFO logs in
+  `_poll_news_forever`** (ticker count and fetched-article count per
+  cycle). Added specifically to diagnose the exception-swallowing bug
+  above, but kept: knowing "the loop is alive and ran with N tickers" is
+  exactly the operational signal that was missing when this was hardest to
+  debug.
+
+- **Live verification performed, credentials courtesy of the user testing
+  locally:** real Alpaca REST snapshot/news calls, a real Alpaca IEX quote
+  stream connection (`subscribed to quotes: ['AAPL']`), five real Groq
+  chat-completion calls producing correctly-formatted one-sentence
+  summaries, Redis caching (`news_summary:{id}` keys with real TTLs), the
+  in-memory broadcast-dedup logic (three subsequent 60s poll cycles each
+  refetched the same 50 articles and correctly made zero new Groq calls),
+  and a real `/ws` client connection via a throwaway Python script. Not
+  verified live: an actual `price_update` broadcast (Alpaca's market was
+  closed for the session during testing, so no quote ticks arrived) — the
+  P&L computation in `websocket_manager.py` remains verified by reading,
+  not by observing a real tick flow through it end-to-end.
