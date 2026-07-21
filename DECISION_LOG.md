@@ -552,3 +552,80 @@ frontend work.
   closed for the session during testing, so no quote ticks arrived) — the
   P&L computation in `websocket_manager.py` remains verified by reading,
   not by observing a real tick flow through it end-to-end.
+
+---
+
+## Commit 7b — GitHub Actions CI (lint + tests on PR)
+
+**Files:** `.github/workflows/ci.yml`, `backend/pyproject.toml`, `backend/requirements-dev.txt`, `backend/tests/test_models.py`
+
+- **Backend "tests" needed something real to run.** There were zero test
+  files anywhere in the repo before this. A CI step that runs `pytest`
+  against an empty `tests/` directory exits non-zero ("no tests ran"),
+  which would make the workflow permanently red for a reason that has
+  nothing to do with code quality. Added `tests/test_models.py` covering
+  `Holding`'s validation logic (ticker normalization, the uppercase/length
+  regex, the `quantity`/`avg_cost` positivity constraints) — genuine tests
+  of real logic, not placeholders, and the one piece of backend code with
+  actual branching to verify without needing Redis/Alpaca/Groq.
+  Deliberately did **not** add integration tests (a live Redis service
+  container, mocked Alpaca/Groq clients) — that's a meaningfully bigger
+  scope than "add a CI workflow," and the user can ask for it separately
+  if wanted.
+
+- **`ruff` chosen for backend linting**, not `flake8`+`isort`+`black`
+  separately — one tool, one config block, covers the same ground
+  (pycodestyle/pyflakes rules `E`/`F` plus import sorting `I`) with a much
+  faster CI step.
+
+- **`line-length = 110`, not ruff's default 88.** Ran `ruff check .`
+  against the existing, already-reviewed backend before adding any config
+  — the only findings were 12 line-length violations (all in the 89–110
+  char range) and one import-sort fix, zero actual bugs (no unused
+  imports, no undefined names). Reformatting a dozen already-correct lines
+  purely to satisfy a default nobody had targeted while writing them would
+  be pure churn; raising the limit to match the codebase's actual style
+  (verified: nothing exceeds 110) was the smaller, more honest diff. The
+  one auto-fixable import-sort finding (`main.py`'s `from models import
+  Holding, TICKER_RE` → alphabetized to `TICKER_RE, Holding`) was applied
+  via `ruff check --fix` and folded into commit 7a's `main.py` changes
+  rather than given its own commit, since it's a one-line cosmetic
+  reorder with no behavior change.
+
+- **`backend/requirements-dev.txt` is separate from `requirements.txt`**,
+  not merged into it. `ruff`/`pytest` have no reason to be installed in
+  the Railway production container (commit 11) — keeping them dev-only
+  keeps the production image smaller and makes it obvious which
+  dependencies are "needed to run this" vs. "needed to work on this."
+
+- **`pythonpath = ["."]` in `backend/pyproject.toml`'s pytest config**,
+  rather than relying on `python -m pytest`'s cwd-insertion behavior or
+  adding `tests/__init__.py`. The backend has no package structure (no
+  `src/` layout, `models.py` etc. live directly in `backend/`), so pytest's
+  default import mode wouldn't put `backend/` on `sys.path` when
+  discovering `backend/tests/test_models.py`, and `from models import
+  Holding` would fail. Explicit `pythonpath` works regardless of how
+  pytest is invoked (bare `pytest`, `python -m pytest`, from CI or
+  locally) rather than depending on invocation-specific behavor.
+
+- **Frontend CI pins Node 22, not Node 20** (what's actually installed in
+  this dev environment, 20.12.1). `npm install` here has been emitting an
+  `EBADENGINE` warning the whole time because `eslint-visitor-keys`
+  requires `^20.19 || ^22.13 || >=24` — 20.12.1 doesn't satisfy that range.
+  It's non-fatal locally, but there's no reason to bake a known engine
+  mismatch into CI when picking a different LTS avoids it entirely.
+
+- **Frontend job runs lint, `tsc --noEmit`, and `next build` as three
+  separate steps**, not just `next build` alone (which does run type
+  checking as part of its pipeline). Splitting them means a PR that fails
+  linting shows "Lint" red rather than a generic "Build" failure — the
+  step name is the first thing a diagnosis starts from.
+
+- **Verification:** ran the exact CI commands locally before writing the
+  workflow, not after — `ruff check .` and `pytest` both pass clean in the
+  backend venv (7 tests), and `npm run lint`, `npx tsc --noEmit`, and
+  `npm run build` all pass clean in the frontend (production build
+  succeeds, 2 static routes generated). The workflow file itself is
+  untested against real GitHub Actions (no push to a remote yet) — the
+  commands it runs are verified, but the YAML syntax and trigger
+  configuration are not.
