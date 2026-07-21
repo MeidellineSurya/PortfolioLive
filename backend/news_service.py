@@ -13,6 +13,7 @@ from datetime import datetime
 import redis.asyncio as redis
 from groq import AsyncGroq
 
+import metrics
 from alpaca_client import AlpacaClient, NewsArticle
 from models import NewsItem
 from portfolio_store import PortfolioStore
@@ -95,6 +96,7 @@ class NewsService:
 
     async def _build_news_item(self, ticker: str, article: NewsArticle) -> NewsItem:
         ai_summary = await self._summarise_cached(article)
+        metrics.news_summaries_generated_total.inc()
         return NewsItem(
             ticker=ticker,
             headline=article.headline,
@@ -137,8 +139,10 @@ class NewsService:
         cache_key = f"news_summary:{article.id}"
         cached = await self._redis.get(cache_key)
         if cached:
+            metrics.news_cache_hits_total.inc()
             return cached
 
+        metrics.news_cache_misses_total.inc()
         summary = await self._summarise(article)
         await self._redis.set(cache_key, summary, ex=SUMMARY_CACHE_TTL_SECONDS)
         return summary
@@ -153,4 +157,5 @@ class NewsService:
             temperature=0.3,
             max_completion_tokens=60,
         )
+        metrics.groq_api_calls_total.inc()
         return response.choices[0].message.content.strip()

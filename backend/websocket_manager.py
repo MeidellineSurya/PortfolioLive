@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import WebSocket
 
+import metrics
 from alpaca_client import AlpacaClient
 from models import Holding, HoldingWithPrice, PriceUpdate
 from portfolio_store import PortfolioStore
@@ -93,9 +94,11 @@ class WebSocketManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self._clients.add(websocket)
+        metrics.active_websocket_connections.set(len(self._clients))
 
     def disconnect(self, websocket: WebSocket) -> None:
         self._clients.discard(websocket)
+        metrics.active_websocket_connections.set(len(self._clients))
 
     async def broadcast(self, message: dict) -> None:
         if not self._clients:

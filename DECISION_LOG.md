@@ -1330,3 +1330,57 @@ last real price from earlier in the day (or an earlier session).
      yet" state, which is what a real user hitting this right now (market
      closed, fresh container) will actually see until the market reopens
      and this process observes its first tick.
+
+---
+
+## Commit 19 — Prometheus /metrics endpoint
+
+**Files:** `backend/metrics.py`, `backend/websocket_manager.py`, `backend/news_service.py`, `backend/main.py`, `backend/requirements.txt`
+
+- **One central `metrics.py`, not a `Counter`/`Gauge` declared locally in
+  each file that needs one.** `prometheus_client` metrics register
+  themselves on a global default registry at creation time —
+  instantiating the same metric name in two places (easy to do by
+  accident across files with no shared reference) raises at import time.
+  A single module every consumer imports from makes that structurally
+  impossible rather than something to remember not to do.
+
+- **Cache hit rate is two raw counters (`news_cache_hits_total`,
+  `news_cache_misses_total`), not a single precomputed ratio gauge.**
+  This is the idiomatic Prometheus pattern, not an arbitrary choice: a
+  ratio computed and stored server-side can only ever answer "since the
+  process started," while raw counters let PromQL compute a rate over
+  whatever window is actually useful
+  (`rate(hits[5m]) / (rate(hits[5m]) + rate(misses[5m]))`). Since part of
+  the point of this endpoint is demonstrating familiarity with how
+  Prometheus metrics are actually consumed, doing it the textbook way
+  mattered more than it would for an internal-only convenience number.
+
+- **`news_summaries_generated_total` increments once per
+  `_build_news_item` call**, which both the 60s broadcast path
+  (`_process_article`) and the on-demand `get_more_news` path funnel
+  through — one counter covers "a news item was produced and shown to a
+  client," regardless of which of the two ways it got there, rather than
+  needing two separately-tracked-and-then-summed counters.
+
+- **`/metrics` is unauthenticated**, alongside `/health` — flagged
+  explicitly here because the very next commit (JWT auth) protects
+  everything else. A Prometheus scraper polling on a fixed interval has
+  no route to a login flow any more than Railway's own health checker
+  does; both need to be reachable without a token by design, not by
+  oversight.
+
+- **Verification:** rebuilt and ran the real Docker image against real
+  traffic — confirmed real counts after real Groq calls (12 calls, 12
+  summaries generated, 0 hits / 12 misses, internally consistent since
+  every summary that cycle needed a fresh call). For the WebSocket gauge
+  specifically, isolated a controlled test from an unrelated confound:
+  the gauge read `2` at baseline from what was almost certainly the
+  user's own open browser tab(s) reconnecting via their WebSocket hook's
+  auto-reconnect (commit 6) after a container restart — not a bug, just
+  real concurrent usage during testing. Connected one fully-controlled
+  script-driven client, confirmed the gauge incremented to `3` while it
+  was held open, then confirmed it dropped back to `2` immediately after
+  that specific client disconnected — proving the metric moves in the
+  correct direction under a known, isolated change, independent of
+  whatever else happened to be connected at the time.

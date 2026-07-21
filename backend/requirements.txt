@@ -5,3 +5,4 @@ fastapi==0.115.4
 uvicorn[standard]==0.32.0
 python-dotenv==1.0.1
 groq==1.5.0
+prometheus-client==0.25.0

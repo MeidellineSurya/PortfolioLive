@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from alert_service import AlertService
 from alert_store import AlertStore
@@ -116,6 +117,15 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    # Deliberately unauthenticated, same as /health — a Prometheus
+    # scraper hitting this on a schedule shouldn't need a JWT any more
+    # than Railway's health checker should (see commit 19's auth work,
+    # which protects everything else).
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/portfolio", response_model_exclude_none=True)
