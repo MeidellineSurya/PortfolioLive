@@ -23,6 +23,22 @@ class Holding(BaseModel):
         return v
 
 
+class HoldingWithPrice(Holding):
+    """GET /portfolio's response shape — a Holding plus whatever last-known
+    price data WebSocketManager has for it (commit 17). Kept separate from
+    Holding rather than adding optional fields directly to it: Holding is
+    also the POST /portfolio/add request body, and conflating "what you
+    send to create a holding" with "what you get back" would make the
+    request schema misleadingly show price fields that only ever apply to
+    responses.
+    """
+
+    price: float | None = None
+    position_value: float | None = None
+    position_pnl: float | None = None
+    position_pnl_pct: float | None = None
+
+
 class PriceUpdate(BaseModel):
     type: Literal["price_update"] = "price_update"
     ticker: str

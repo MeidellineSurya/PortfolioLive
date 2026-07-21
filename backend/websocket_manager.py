@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import WebSocket
 
 from alpaca_client import AlpacaClient
-from models import PriceUpdate
+from models import Holding, HoldingWithPrice, PriceUpdate
 from portfolio_store import PortfolioStore
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,43 @@ class WebSocketManager:
 
     def get_last_prices(self) -> dict[str, float]:
         return dict(self._last_prices)
+
+    def enrich_holdings(self, holdings: list[Holding]) -> list[HoldingWithPrice]:
+        """Attaches last-known price/value/P&L to each holding, for
+        GET /portfolio. Without this, a freshly-loaded page (or a page
+        loaded while the market's closed, before this process has seen a
+        single tick) shows blank placeholders until the *next* live tick
+        arrives, even if this process already knows the last real price
+        from earlier — e.g. from when the market was open earlier today.
+        Holdings with no known price (just added, or never ticked this
+        process's lifetime) get `None` fields, same as a row that hasn't
+        received its first WebSocket tick yet.
+        """
+        enriched = []
+        for holding in holdings:
+            price = self._last_prices.get(holding.ticker)
+            if price is None:
+                enriched.append(HoldingWithPrice(**holding.model_dump()))
+                continue
+            position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
+            enriched.append(
+                HoldingWithPrice(
+                    **holding.model_dump(),
+                    price=round(price, 4),
+                    position_value=round(position_value, 2),
+                    position_pnl=round(position_pnl, 2),
+                    position_pnl_pct=round(position_pnl_pct, 4),
+                )
+            )
+        return enriched
+
+    @staticmethod
+    def _position_math(holding: Holding, price: float) -> tuple[float, float, float]:
+        cost_basis = holding.avg_cost * holding.quantity
+        position_value = price * holding.quantity
+        position_pnl = position_value - cost_basis
+        position_pnl_pct = (position_pnl / cost_basis * 100) if cost_basis else 0.0
+        return position_value, position_pnl, position_pnl_pct
 
     # ---- frontend client management ------------------------------------
 
@@ -103,10 +140,7 @@ class WebSocketManager:
         change = price - prev_close
         change_pct = (change / prev_close * 100) if prev_close else 0.0
 
-        cost_basis = holding.avg_cost * holding.quantity
-        position_value = price * holding.quantity
-        position_pnl = position_value - cost_basis
-        position_pnl_pct = (position_pnl / cost_basis * 100) if cost_basis else 0.0
+        position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
 
         update = PriceUpdate(
             ticker=ticker,

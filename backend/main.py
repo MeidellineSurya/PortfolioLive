@@ -14,7 +14,15 @@ from alert_service import AlertService
 from alert_store import AlertStore
 from alpaca_client import AlpacaClient
 from analytics_service import AnalyticsService
-from models import TICKER_RE, AnalyticsResponse, Holding, NewsItem, PriceAlert, PriceAlertCreate
+from models import (
+    TICKER_RE,
+    AnalyticsResponse,
+    Holding,
+    HoldingWithPrice,
+    NewsItem,
+    PriceAlert,
+    PriceAlertCreate,
+)
 from news_service import NewsService
 from portfolio_store import PortfolioStore
 from websocket_manager import WebSocketManager
@@ -110,9 +118,15 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/portfolio")
-async def get_portfolio() -> list[Holding]:
-    return await app.state.store.get_all_holdings()
+@app.get("/portfolio", response_model_exclude_none=True)
+async def get_portfolio() -> list[HoldingWithPrice]:
+    # exclude_none means a holding with no known price yet omits those
+    # fields from the JSON entirely, rather than sending explicit nulls —
+    # matches how the frontend's PortfolioRow already treats "field
+    # absent" as "no live data yet" (commit 7), so no frontend-side null
+    # handling is needed for this to slot in cleanly.
+    holdings = await app.state.store.get_all_holdings()
+    return app.state.ws_manager.enrich_holdings(holdings)
 
 
 @app.post("/portfolio/add", status_code=201)

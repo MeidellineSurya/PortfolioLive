@@ -10,6 +10,19 @@ export type Holding = {
   avg_cost: number;
 };
 
+// GET /portfolio's response shape (backend/models.py's HoldingWithPrice):
+// a Holding plus whatever last-known price data the backend has for it
+// (commit 17) — absent entirely, not null, when unknown, since the
+// backend serializes with exclude_none. This is what lets the table show
+// real numbers on first load instead of always starting blank until the
+// next live tick.
+export type HoldingWithPrice = Holding & {
+  price?: number;
+  position_value?: number;
+  position_pnl?: number;
+  position_pnl_pct?: number;
+};
+
 export type PriceUpdate = {
   type: "price_update";
   ticker: string;

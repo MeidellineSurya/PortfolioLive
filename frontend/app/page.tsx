@@ -8,7 +8,7 @@ import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
 import ToastStack, { type ToastMessage } from "./components/Toast";
 import { useWebSocket } from "@/lib/websocket";
-import type { Holding, NewsItem, PortfolioRow, PriceAlert, PriceUpdate } from "@/lib/types";
+import type { Holding, HoldingWithPrice, NewsItem, PortfolioRow, PriceAlert, PriceUpdate } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -19,7 +19,7 @@ const MAX_PRICE_HISTORY = 20;
 type PortfolioState = Record<string, PortfolioRow>;
 
 type PortfolioAction =
-  | { type: "SET_HOLDINGS"; holdings: Holding[] }
+  | { type: "SET_HOLDINGS"; holdings: HoldingWithPrice[] }
   | { type: "ADD_HOLDING"; holding: Holding }
   | { type: "REMOVE_HOLDING"; ticker: string }
   | { type: "PRICE_UPDATE"; update: PriceUpdate };
@@ -75,7 +75,7 @@ export default function Home() {
     let cancelled = false;
     fetch(`${API_URL}/portfolio`)
       .then((res) => res.json())
-      .then((holdings: Holding[]) => {
+      .then((holdings: HoldingWithPrice[]) => {
         if (!cancelled) dispatch({ type: "SET_HOLDINGS", holdings });
       })
       .catch(() => {

@@ -1272,3 +1272,61 @@ disappeared from the UI entirely (`PortfolioTable` filtered to
   `/analytics` route still compiles and serves 200 with the new section
   present in the component tree. Did not visually confirm the rendered
   charts in a browser.
+
+---
+
+## Commit 18 — Last-known price on page load
+
+**Files:** `backend/main.py`, `backend/models.py`, `backend/websocket_manager.py`, `frontend/lib/types.ts`, `frontend/app/page.tsx`
+
+User-asked-and-answered: "does the holding value only show when the
+market's open?" — yes, because `GET /portfolio` only ever returned
+`{ticker, quantity, avg_cost}`, so every fresh page load started blank
+until the *next* live tick, even if the backend process already knew the
+last real price from earlier in the day (or an earlier session).
+
+- **`WebSocketManager.enrich_holdings` reuses the exact P&L formula
+  `on_quote` already had inline**, now extracted into a shared
+  `_position_math` static helper. Two call sites computing "cost basis,
+  position value, P&L, P&L%" independently would be two places that could
+  quietly drift out of sync if the formula ever changed in one but not
+  the other — a live tick and a page-load snapshot should never be able
+  to disagree about what a position is worth for the same price.
+
+- **`HoldingWithPrice` is a new model, not four new optional fields bolted
+  onto `Holding`.** `Holding` is also `POST /portfolio/add`'s request
+  body — adding response-only fields directly to it would make the
+  request schema (visible in `/docs`) misleadingly show `price`/`position_value`/etc.
+  as things a client could theoretically send when creating a holding,
+  which they can't and shouldn't.
+
+- **`GET /portfolio` uses `response_model_exclude_none=True`, so a holding
+  with no known price omits those fields from the JSON entirely rather
+  than sending explicit `null`s.** This matters beyond style: the
+  frontend's `PortfolioRow`/`HoldingWithPrice` types already treat "field
+  absent" as "no data yet" everywhere else in the app (commit 7's
+  `hasLiveData = row.price !== undefined` check). Sending explicit nulls
+  would've needed either a second convention on the frontend or a risk of
+  a `null` silently overwriting a real price already sitting in state
+  from a WebSocket tick that arrived first — omission was the one-line
+  fix that avoided introducing either problem.
+
+- **Verification, in two parts, since the running Docker container's
+  in-memory `_last_prices` resets on every rebuild/restart (documented
+  behavior, not a bug) and the market's been closed this whole session:**
+  1. Real code, real Redis, real holdings (including one I didn't add
+     myself — a `GOOG` position turned up in the shared Redis from
+     between-session testing, left alone rather than "cleaned up," since
+     it's exactly the kind of incidental real data this feature needs to
+     handle correctly): called `enrich_holdings` before and after a
+     simulated tick, confirmed only the ticked ticker gets populated,
+     confirmed the math (`AAPL` at `$211.50`, qty 10, avg cost `$200` →
+     `$2,115` value, `$115` P&L, `5.75%`), and confirmed the
+     `exclude_none` JSON shape matches exactly what the real route
+     produces.
+  2. Rebuilt and ran the actual Docker image, confirmed `GET /portfolio`
+     on a cold start correctly omits price fields entirely for every
+     holding (200, no crash, no stray `null`s) — the honest "don't know
+     yet" state, which is what a real user hitting this right now (market
+     closed, fresh container) will actually see until the market reopens
+     and this process observes its first tick.
