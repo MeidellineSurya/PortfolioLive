@@ -1044,3 +1044,112 @@ anything older on demand.
   already run and verified earlier in this project's development — this
   README doesn't introduce any new untested instructions, it documents
   paths that were already exercised.
+
+---
+
+## Commit 15 — Price alerts + portfolio analytics (backend)
+
+**Files:** `backend/websocket_manager.py`, `backend/alert_store.py`, `backend/alert_service.py`, `backend/analytics_service.py`, `backend/models.py`, `backend/main.py`, `backend/tests/test_alert_service.py`
+
+User-requested features, prioritized over lightweight auth and a
+Prometheus endpoint (also proposed) as the two with the most product
+value for the effort. Both build on a gap the codebase had until now: no
+persistent record of "the current price of this ticker" — every tick was
+turned into a broadcast and forgotten.
+
+- **`WebSocketManager` gained a `last_prices` cache and a
+  `add_quote_listener` hook, shared by both features.** Price alerts need
+  the *previous* price to detect a crossing (not just "price is currently
+  past the target," which would re-fire every tick); portfolio snapshots
+  need "what's this holding worth right now" outside of a tick handler
+  entirely. Both needs are met by the same cache. The listener hook keeps
+  `WebSocketManager` from needing to import or know about `AlertService`
+  — it calls whatever's registered with `(ticker, previous_price, price)`
+  after every quote, the same loosely-coupled shape already used for
+  `AlpacaClient`'s `on_quote`/`get_tickers`/`on_batch` callbacks. Listener
+  exceptions are caught and logged individually so one broken listener
+  can't take down price broadcasting for everyone.
+
+- **Alert crossing is "previous < target ≤ new" (or the mirror for
+  below), not "new ≥ target."** The latter would fire on *every* tick
+  once the price is past the target, not once. Verified with a
+  parametrized test (`test_alert_service.py`) covering landing exactly on
+  the target, jumping clean over it, and the "already past, moving
+  further away" case that a naive `price >= target` check would
+  incorrectly re-trigger.
+
+- **Alerts can only be created for tickers already held.** Checked
+  against a real trap: alerts only ever get evaluated from inside
+  `on_quote`, which only fires for tickers Alpaca is actually subscribed
+  to — and that subscription is driven entirely by portfolio holdings.
+  An alert for an unheld ticker would never receive a tick to compare
+  against and would sit forever, silently dead, with no error to explain
+  why. Supporting watchlist-style alerts (not-yet-owned tickers) would
+  mean giving alerts their own Alpaca subscription lifecycle independent
+  of holdings — meaningfully bigger scope than what was asked for.
+
+- **Removing a holding cascades to delete its alerts**
+  (`delete_alerts_for_ticker`, called from `DELETE /portfolio/{ticker}`).
+  Without this, an orphaned alert would sit in the list forever, looking
+  active, for a ticker that can now never produce a tick to check it
+  against.
+
+- **Portfolio snapshots store per-ticker data, not just portfolio
+  totals.** "Best/worst performer" is a per-ticker question — computing
+  it later from portfolio-level totals alone would be impossible. Each
+  hourly snapshot (`PortfolioSnapshot`, stored as JSON in a Redis sorted
+  set scored by unix timestamp, so "last N days" is a range query, not a
+  scan) carries `{price, value, pnl_pct}` per ticker alongside the totals.
+
+- **A ticker with no known price yet is skipped in a snapshot, not
+  defaulted to `avg_cost`.** Falling back to cost basis would silently
+  represent "we don't know" as "no change since purchase," which is a
+  fabricated data point sitting in a history chart, not an honest gap.
+
+- **Best/worst performer is always a fixed 7-day window, independent of
+  whatever `days` the chart itself was asked for.** It's part of the
+  feature's definition ("over the last 7 days"), not a parameter — a
+  30-day chart request shouldn't silently change what "best/worst
+  performer" means. Implemented as a second, separate range query rather
+  than deriving it from the chart's own (differently-windowed) history.
+
+- **"Total return since inception" reuses the latest snapshot's
+  `total_pnl`/`total_pnl_pct` rather than computing a second, separately-
+  defined "return since tracking began" number.** For a personal
+  portfolio, "P&L since you bought these positions" *is* "since
+  inception" — inventing a distinct snapshot-based definition (e.g.
+  value-now vs. value-at-first-snapshot) would produce a second number
+  answering a subtly different question for no clear benefit, and would
+  diverge from the dashboard's own top-line P&L stat for no good reason.
+
+- **`GET /analytics` and `snapshot_once()` are separate from the hourly
+  loop**, callable independently. `snapshot_once()` is what the loop
+  calls on a timer, but keeping it a standalone method (not inlined into
+  the loop) is what made it possible to verify the whole pipeline —
+  ticks in, snapshot out, math correct — without waiting real hours
+  between data points (see verification below).
+
+- **Live verification, in two parts, since the market was closed for
+  this whole session (see commit 7a) and a running Docker container
+  can't have external Python calls injected into its internal objects:**
+  1. *Alerts:* wired real `PortfolioStore` + `WebSocketManager` +
+     `AlertStore` + `AlertService` against real Redis in a standalone
+     script (not mocks), created a real alert, fed two `on_quote` calls
+     simulating a price crossing $210. Confirmed: first tick establishes
+     the baseline with no false trigger, second tick broadcasts both the
+     `price_update` *and* a `price_alert` message with the correct
+     `direction`, and the alert's `triggered` flag persists as `true` in
+     Redis afterward.
+  2. *Analytics:* same approach — real code, real Redis, fed three rounds
+     of synthetic ticks at different prices, called `snapshot_once()`
+     after each, then hand-verified every number `get_analytics()`
+     returned against the input prices (cost basis, per-ticker `pnl_pct`,
+     `best_performer_7d`/`worst_performer_7d` percentages) — all matched
+     exactly.
+  Also rebuilt and ran the real Docker image (commit 11) against real
+  Redis/Alpaca/Groq: confirmed `POST/GET/DELETE /alerts` end-to-end
+  (including the "not in your portfolio" 400 and the cascade-delete on
+  holding removal), and confirmed `GET /analytics` returns a correct
+  empty state (`history: []`, both performers `null`) when no snapshot
+  yet exists — which is what actually happened in the live container,
+  since `last_prices` was empty the whole time the market was closed.

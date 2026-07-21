@@ -41,3 +41,63 @@ class NewsItem(BaseModel):
     ai_summary: str
     url: str
     published_at: str
+
+
+class PriceAlertCreate(BaseModel):
+    ticker: str
+    target_price: float = Field(gt=0)
+
+    # Duplicated from Holding rather than shared via a mixin — two fields
+    # isn't enough repetition to justify the indirection of pulling this
+    # out, and the two models validate the same field for unrelated
+    # reasons (a holding you own vs. a price you're watching for).
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not TICKER_RE.match(v):
+            raise ValueError("ticker must be 1-5 uppercase letters (A-Z)")
+        return v
+
+
+class PriceAlert(BaseModel):
+    id: str
+    ticker: str
+    target_price: float
+    triggered: bool = False
+
+
+class PriceAlertTriggered(BaseModel):
+    type: Literal["price_alert"] = "price_alert"
+    id: str
+    ticker: str
+    target_price: float
+    price: float
+    direction: Literal["above", "below"]
+
+
+class HoldingSnapshot(BaseModel):
+    price: float
+    value: float
+    pnl_pct: float
+
+
+class PortfolioSnapshot(BaseModel):
+    timestamp: str
+    total_value: float
+    total_pnl: float
+    total_pnl_pct: float
+    holdings: dict[str, HoldingSnapshot]
+
+
+class PerformanceEntry(BaseModel):
+    ticker: str
+    change_pct: float
+
+
+class AnalyticsResponse(BaseModel):
+    total_pnl: float
+    total_pnl_pct: float
+    history: list[PortfolioSnapshot]
+    best_performer_7d: PerformanceEntry | None
+    worst_performer_7d: PerformanceEntry | None

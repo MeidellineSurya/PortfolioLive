@@ -8,6 +8,7 @@ added/removed, and every incoming quote is turned into a P&L-aware
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from fastapi import WebSocket
 
@@ -16,6 +17,13 @@ from models import PriceUpdate
 from portfolio_store import PortfolioStore
 
 logger = logging.getLogger(__name__)
+
+# Called with (ticker, previous_price, new_price) after every quote that
+# has a previous price to compare against. Lets other services (price
+# alerts, portfolio snapshots) react to ticks without WebSocketManager
+# needing to know they exist — the same loosely-coupled callback shape
+# already used for AlpacaClient's on_quote/get_tickers/on_batch.
+QuoteListener = Callable[[str, float, float], Awaitable[None]]
 
 
 class WebSocketManager:
@@ -27,6 +35,21 @@ class WebSocketManager:
         # in memory for the life of the process — see decision log for why
         # day-rollover refresh is out of scope.
         self._prev_close: dict[str, float] = {}
+        # Last price seen per ticker — this is new state, not previously
+        # tracked anywhere: on_quote used to compute a PriceUpdate and
+        # broadcast it without remembering it afterwards. Needed by both
+        # price alerts (to detect a threshold *crossing*, not just "price
+        # is currently past it") and portfolio snapshots (analytics needs
+        # to know "what's this holding worth right now" outside of a tick
+        # handler).
+        self._last_prices: dict[str, float] = {}
+        self._quote_listeners: list[QuoteListener] = []
+
+    def add_quote_listener(self, listener: QuoteListener) -> None:
+        self._quote_listeners.append(listener)
+
+    def get_last_prices(self) -> dict[str, float]:
+        return dict(self._last_prices)
 
     # ---- frontend client management ------------------------------------
 
@@ -95,3 +118,16 @@ class WebSocketManager:
             position_pnl_pct=round(position_pnl_pct, 4),
         )
         await self.broadcast(update.model_dump())
+
+        previous_price = self._last_prices.get(ticker)
+        self._last_prices[ticker] = price
+        # No previous price means this is the first tick this process has
+        # ever seen for the ticker — nothing to compare against yet, so
+        # there's no "crossing" to detect (see AlertService, which is the
+        # only current listener and needs exactly this guarantee).
+        if previous_price is not None:
+            for listener in self._quote_listeners:
+                try:
+                    await listener(ticker, previous_price, price)
+                except Exception:
+                    logger.exception("quote listener failed for %s", ticker)
