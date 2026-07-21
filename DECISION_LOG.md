@@ -995,3 +995,52 @@ anything older on demand.
   produces was verified directly against the real backend and real
   Alpaca data, which is the part most likely to have hidden a bug (as it
   did, in commit 12's `end`-is-inclusive finding).
+
+---
+
+## Commit 14 — README with architecture diagram
+
+**Files:** `README.md`
+
+- **The architecture diagram is Mermaid, not a static image or ASCII
+  art** — GitHub renders `mermaid` code fences natively in Markdown, so
+  it stays readable in a diff (plain text) and doesn't need a separate
+  export step or an image file to keep in sync with the text around it.
+
+- **The diagram went through two draft/render/fix cycles before landing
+  in the README, not one.** Installed `@mermaid-js/mermaid-cli` and
+  actually rendered the diagram to SVG/PNG rather than trusting the
+  syntax by inspection — the first draft had the frontend's "REST: add /
+  remove / load more" edge pointing at the whole `backend` subgraph
+  (Mermaid draws that as an arrow into the subgraph's boundary, not a
+  specific node), which rendered as a confusing line crossing over the
+  Groq box. Fixed by adding `main.py (REST routes)` as its own node in
+  the diagram and pointing the edge there instead — which is also more
+  architecturally accurate: `main.py` *is* the real REST entry point that
+  delegates to `PortfolioStore`/`NewsService`, and the first draft's
+  diagram was eliding that. Re-rendered to confirm the fix actually
+  resolved the visual issue rather than just looking plausible in the
+  markup.
+
+- **"Known constraints" restates the spec's original three
+  (15-min-delayed data, Groq rate limits, REST-not-WebSocket news) and
+  adds three more discovered during actual development**: US-equities-only
+  (a consequence of which Alpaca API this app calls, not an explicit
+  restriction — noted in commit 2's file but never surfaced anywhere a
+  reader would see it without reading the code), no news replay for
+  late-joining clients (hit *live*, by the user, mid-session — see the
+  conversation around commit 13), and sparklines not persisting across
+  reloads (commit 10). Limitations that were only ever discussed in chat
+  or buried in a single file's decision-log entry are exactly the kind of
+  thing a README should surface, since they're the questions a new reader
+  — or the user, months later — would actually ask.
+
+- **Verification:** the Mermaid diagram was extracted and rendered to
+  both SVG and PNG via `mmdc`, confirming valid syntax (not just
+  eyeballed) and, via the PNG, that the layout is actually legible rather
+  than merely syntactically valid. Every command in the "Getting started"
+  section (venv creation, `pip install`, `ruff check`, `pytest`, `npm
+  install`, `npm run dev`, `docker build`/`docker run`) matches commands
+  already run and verified earlier in this project's development — this
+  README doesn't introduce any new untested instructions, it documents
+  paths that were already exercised.
