@@ -35,7 +35,11 @@ export type WSMessage = PriceUpdate | NewsItem;
 // A holding merged with whatever live price data has arrived for it so
 // far. The price fields are optional because a holding exists in the
 // table (from GET /portfolio) before its first `price_update` tick
-// arrives — the row renders with placeholders until then.
+// arrives — the row renders with placeholders until then. `priceHistory`
+// is client-only state (not part of the backend's PriceUpdate shape) —
+// the last N prices seen, oldest first, for the row's sparkline.
 export type PortfolioRow = Holding &
-  Partial<Omit<PriceUpdate, "type" | "ticker">>;
+  Partial<Omit<PriceUpdate, "type" | "ticker">> & {
+    priceHistory?: number[];
+  };
 

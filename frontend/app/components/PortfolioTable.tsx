@@ -1,5 +1,6 @@
 "use client";
 
+import PriceSparkline from "./PriceSparkline";
 import type { PortfolioRow } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
@@ -26,6 +27,7 @@ export default function PortfolioTable({ rows, onRemove }: PortfolioTableProps) 
             <th className="py-2 pr-4 font-medium">Qty</th>
             <th className="py-2 pr-4 font-medium">Avg Cost</th>
             <th className="py-2 pr-4 font-medium">Current Price</th>
+            <th className="py-2 pr-4 font-medium">Trend</th>
             <th className="py-2 pr-4 font-medium">Value</th>
             <th className="py-2 pr-4 font-medium">P&amp;L ($)</th>
             <th className="py-2 pr-4 font-medium">P&amp;L (%)</th>
@@ -59,6 +61,9 @@ function PortfolioRowView({
       <td className="py-2 pr-4 tabular-nums">{formatCurrency(row.avg_cost)}</td>
       <td className="py-2 pr-4 tabular-nums">
         {hasLiveData ? formatCurrency(row.price!) : "—"}
+      </td>
+      <td className="py-2 pr-4">
+        <PriceSparkline prices={row.priceHistory ?? []} />
       </td>
       <td className="py-2 pr-4 tabular-nums">
         {row.position_value !== undefined ? formatCurrency(row.position_value) : "—"}

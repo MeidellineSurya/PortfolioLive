@@ -12,6 +12,7 @@ import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/forma
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws";
 const MAX_NEWS_ITEMS = 20;
+const MAX_PRICE_HISTORY = 20;
 
 type PortfolioState = Record<string, PortfolioRow>;
 
@@ -53,7 +54,8 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
       // backend. Dropping it here mirrors the backend's own stale-tick
       // handling (websocket_manager.py, commit 3).
       if (!existing) return state;
-      return { ...state, [action.update.ticker]: { ...existing, ...action.update } };
+      const priceHistory = [...(existing.priceHistory ?? []), action.update.price].slice(-MAX_PRICE_HISTORY);
+      return { ...state, [action.update.ticker]: { ...existing, ...action.update, priceHistory } };
     }
     default:
       return state;

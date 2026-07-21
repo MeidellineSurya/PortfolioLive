@@ -743,3 +743,71 @@ frontend work.
   state changes with no complex logic, but "renders correctly in a
   browser" specifically still wasn't observed, for the same
   no-headless-browser reason as commits 7 and 8.
+
+---
+
+## Commit 10 — Sparkline charts
+
+**Files:** `frontend/app/components/PriceSparkline.tsx`, `frontend/app/components/PortfolioTable.tsx`, `frontend/app/page.tsx`, `frontend/lib/types.ts`
+
+- **Price history lives in `PortfolioRow.priceHistory`, appended in the
+  `PRICE_UPDATE` reducer case, capped at 20 with `.slice(-20)`.** This is
+  client-only derived state with no backend equivalent — `PriceUpdate`
+  only ever carries the single latest price (`websocket_manager.py`,
+  commit 3), so "last 20 points" has to be accumulated client-side, tick
+  by tick, from the moment each ticker starts receiving updates. A
+  practical consequence worth knowing: the sparkline only reflects prices
+  seen *since this browser tab connected* — reloading the page empties
+  `priceHistory` back to zero and it rebuilds from scratch, even though
+  the ticker itself may have been tracked for hours. Fetching historical
+  bars from Alpaca to pre-seed the chart on load would fix that, but nothing
+  in the spec asks for it and it's a distinct feature, not a sparkline
+  detail.
+
+- **The sparkline's color reflects the trend *within its own 20-tick
+  window* (last price vs. first price currently visible), not the
+  position's overall P&L sign.** These can legitimately disagree — a
+  holding purchased at a loss can be ticking upward right now, or vice
+  versa. Reusing the P&L column's green/red logic for the sparkline would
+  conflate "how is this position doing overall" with "what's this price
+  doing right now," which are different questions the two UI elements are
+  each supposed to answer on their own.
+
+- **Added as a new "Trend" column between "Current Price" and "Value"**,
+  not appended at the end after "P&L (%)". The spec's column list doesn't
+  mention it at all (sparklines are described separately, under
+  `PortfolioTable.tsx`'s bullet points, not in the "Columns:" line) — placed
+  next to the price it's charting rather than after the P&L columns, since
+  it's visually a detail *of* the price, not a summary metric like the
+  columns that follow it.
+
+- **`PriceSparkline` renders an em dash placeholder below 2 data points**,
+  matching every other "no data yet" cell in `PortfolioTable` (commit 7).
+  A `LineChart` with 0 or 1 points is either empty or a single dot — neither
+  reads as "chart," so treating "not enough data" as its own explicit state
+  (rather than rendering a degenerate/empty chart) keeps it visually
+  consistent with the rest of the row.
+
+- **Bundle size impact, noted rather than addressed:** the page route's
+  First Load JS grew from ~3 kB to ~92 kB after adding `recharts` imports
+  (confirmed via `next build` output). Recharts is what the spec
+  specifies, and a mini sparkline doesn't justify hunting for a lighter
+  charting library — but it's the single biggest jump in bundle size of
+  any commit so far, worth knowing about if load time becomes a concern
+  later.
+
+- **Verification:** `npx tsc --noEmit` and `npx eslint` clean.
+  `npm run build` succeeds with `recharts` bundled — this specifically
+  checks that `ResponsiveContainer` (which measures DOM dimensions) doesn't
+  break Next's server-side rendering pass, since that class of
+  measurement-dependent component is a common source of SSR crashes in
+  React charting libraries. Started the real backend + frontend together
+  again (same setup as commit 9) and confirmed no compile or runtime
+  errors in either server's logs. Did not visually confirm an actual
+  rendered sparkline with real price ticks flowing through it — the
+  market was closed for every live-testing session in this project so
+  far, so `priceHistory` never accumulated enough real points to plot;
+  what's verified is that the component handles zero/one-point input
+  correctly (renders the placeholder) and that the two-or-more-point
+  rendering path type-checks and builds, not that it looks right on
+  screen with real data.
