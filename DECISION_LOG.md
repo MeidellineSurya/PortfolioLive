@@ -811,3 +811,83 @@ frontend work.
   correctly (renders the placeholder) and that the two-or-more-point
   rendering path type-checks and builds, not that it looks right on
   screen with real data.
+
+---
+
+## Commit 11 — Docker + Railway deployment config
+
+**Files:** `backend/Dockerfile`, `backend/.dockerignore`, `backend/railway.toml`
+
+- **`CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}` — the
+  `exec` is load-bearing, not stylistic, and this was verified empirically,
+  not assumed.** Railway assigns the listen port at runtime via `$PORT`,
+  which rules out JSON-array `CMD` (no shell, no variable expansion — the
+  literal string `"$PORT"` would get passed to uvicorn). But shell-form
+  `CMD` on its own runs `/bin/sh -c "..."` as PID 1 with uvicorn as its
+  *child*; Docker's `stop` sends `SIGTERM` to PID 1, and a plain shell
+  isn't guaranteed to forward it to the child. That matters concretely
+  here: `main.py`'s lifespan `try/finally` (commit 7a) only closes the
+  Alpaca stream connection on a clean shutdown — if `SIGTERM` never
+  reaches uvicorn, Railway's container just hangs until Docker's
+  `SIGKILL` timeout, and the exact connection-leak problem commit 7a fixed
+  comes back on every redeploy. `exec` in a shell-form `CMD` replaces the
+  shell process image with the command itself (standard POSIX behavior),
+  so uvicorn ends up *as* PID 1 and receives signals directly.
+  Built the image, ran it, and confirmed via `docker top` that the
+  container's PID 1 is the `uvicorn` process itself (not `/bin/sh`), and
+  timed `docker stop`: 0.39s, vs. what would be a ~10s hang to the default
+  `SIGKILL` timeout if the signal weren't reaching the app. Also confirmed
+  a non-default `PORT` env var (`9000`) is correctly picked up and bound.
+  Note: an earlier test *without* `exec` also stopped quickly (1.2s) —
+  turned out `/bin/sh -c` applies its own tail-call optimization and
+  exec's automatically when the command string is a single simple command
+  with nothing else to do afterward, which happened to be true here. Kept
+  the explicit `exec` anyway rather than relying on that implementation
+  detail: it's shell-version-dependent, silently breaks if `CMD` ever
+  grows a second statement (e.g. `&& echo done`), and is what actually
+  addresses Docker's own `JSONArgsRecommended` lint warning rather than
+  coincidentally satisfying it.
+
+- **Runs as a non-root `appuser`**, created and `chown`'d in the same
+  `RUN` layer right before `USER appuser`. Standard container hardening —
+  no process in this app needs root (no privileged ports, no system
+  package installs at runtime).
+
+- **`requirements.txt` is `COPY`'d and installed in its own layer before
+  `COPY . .`**, so `docker build` only re-runs `pip install` (the slow
+  step — `alpaca-py`, `pandas`, `pydantic-core` all have real wheels to
+  fetch) when dependencies actually change, not on every source edit.
+  Standard layer-caching order, but worth stating since it's the reason
+  the two `COPY` lines aren't merged into one.
+
+- **`.dockerignore` excludes `tests/`, `.venv/`, `.env`, and
+  `requirements-dev.txt`** — none of `ruff`/`pytest`/the local venv/dev
+  secrets belong in a production image. Mirrors the `requirements.txt` vs
+  `requirements-dev.txt` split from commit 7b: dev-only tooling doesn't
+  ship.
+
+- **`railway.toml` sets `healthcheckPath = "/health"`**, pointing at the
+  endpoint added all the way back in commit 4. Railway won't route traffic
+  to a new deploy until its health check passes, which — combined with
+  `restartPolicyType = "ON_FAILURE"` — means a deploy that can't reach
+  Redis or has bad Alpaca/Groq credentials fails the health check and gets
+  rolled back automatically, rather than serving broken traffic.
+
+- **No `frontend/Dockerfile`.** The spec's own architecture line is
+  explicit: "Deploy: Railway (backend), Vercel (frontend)." Vercel builds
+  Next.js apps natively from the repo (its own build pipeline, not a
+  Dockerfile) — adding one would be unused configuration for a deploy
+  target that was never going to read it.
+
+- **Verification, all done against the real Docker daemon, not just
+  `Dockerfile` syntax review:** `docker build` succeeds (all 34 backend
+  dependencies install cleanly on `python:3.12-slim`, including compiled
+  ones — `pydantic-core`, `numpy`, `pandas` — via prebuilt wheels, no
+  `build-essential` needed). Ran the built image standalone against an
+  isolated, empty Redis container (deliberately not the one with leftover
+  `AAPL` test data from earlier sessions, to keep this a clean "container
+  boots with no external state" check) and confirmed `GET /health` returns
+  `200`. `railway.toml` parsed successfully with Python's `tomllib` to
+  catch any TOML syntax error before it'd surface as a Railway deploy
+  failure. All test containers and the test image were removed after
+  verification — nothing left running.
