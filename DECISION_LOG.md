@@ -944,3 +944,54 @@ anything older on demand.
   above): real API calls, real pagination behavior, real dedup
   correctness. Same call made in commit 7b about integration tests
   applies here.
+
+---
+
+## Commit 13 — News tabs + load-more UI (frontend)
+
+**Files:** `frontend/app/components/NewsFeed.tsx`, `frontend/app/page.tsx`
+
+- **The "All" tab's sentinel value is `null`, not the string `"ALL"`.**
+  Checked before writing this: Allstate Corporation's real ticker symbol
+  is `ALL`. A user holding Allstate stock would have a tab literally
+  labeled "ALL" sitting next to the meta-tab meaning "show everything" —
+  using the string `"ALL"` as that meta-tab's identity would make the two
+  indistinguishable in state (`selectedTicker === "ALL"` could mean
+  either). `string | null` makes them representationally different: no
+  valid ticker can ever equal `null`.
+
+- **"Load more" state (`loadedMore`) lives inside `NewsFeed`, not lifted
+  up into `page.tsx`'s `news` state.** `page.tsx`'s `news` array
+  specifically represents "what arrived live over the WebSocket" — that's
+  its whole contract with the reducer-adjacent state design from commits
+  7–9. Manually-paged-in older articles are a different kind of thing (an
+  explicit user request, not a live event), and folding them into the
+  same array would blur that distinction for no benefit, since nothing
+  outside `NewsFeed` needs to know about them.
+
+- **Tabs are driven by the portfolio's ticker list (a new `tickers` prop
+  from `page.tsx`), not by which tickers happen to already have news
+  items.** A just-added ticker with zero news yet still gets a tab —
+  clicking it shows the (already-existing) empty state, confirming "this
+  ticker is tracked, there's just nothing yet" rather than that ticker
+  having no way to be selected at all.
+
+- **Client-side dedup by `ticker-url` runs on the combined (live + loaded-
+  more) list before rendering**, on top of the backend's own
+  `_broadcast_ids` guard (commit 12). Belt-and-suspenders: if a live
+  WebSocket item and a "load more" page ever raced and both included the
+  same article, this silently drops the second copy instead of rendering
+  a visible duplicate — cheap insurance for a scenario the backend guard
+  is already supposed to prevent.
+
+- **Verification:** `tsc`/`eslint` clean, production build succeeds.
+  Rebuilt and reran the Docker backend image (commit 11) with the new
+  endpoint, hit it directly with `curl` to confirm the exact pagination
+  behavior described in commit 12, then ran the real frontend against it
+  and confirmed via SSR output that the "All" tab renders with no compile
+  or runtime errors. Did not visually click through tabs / "Load more" in
+  an actual browser — same no-headless-browser constraint as every
+  frontend commit this session — but the network contract each UI action
+  produces was verified directly against the real backend and real
+  Alpaca data, which is the part most likely to have hidden a bug (as it
+  did, in commit 12's `end`-is-inclusive finding).

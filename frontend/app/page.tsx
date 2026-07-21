@@ -163,7 +163,7 @@ export default function Home() {
 
         <aside>
           <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">News</h2>
-          <NewsFeed items={news} />
+          <NewsFeed items={news} tickers={rows.map((row) => row.ticker)} />
         </aside>
       </div>
     </div>
