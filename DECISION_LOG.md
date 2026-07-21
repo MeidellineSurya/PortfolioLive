@@ -380,3 +380,79 @@ decisions made in that commit — not a changelog of what files were touched.
   env vars to set — never actually made it into git. Added a `!.env*.example`
   negation line. Caught by checking `git status` after staging rather than
   assuming `git add` picked up everything intended.
+
+---
+
+## Commit 7 — Portfolio table with live updates
+
+**Files:** `frontend/app/page.tsx`, `frontend/app/components/PortfolioTable.tsx`, `frontend/lib/types.ts` (`PortfolioRow`), `frontend/lib/format.ts` (new), `frontend/app/layout.tsx` (metadata)
+
+- **Added `lib/format.ts`, which isn't in the spec's listed file structure.**
+  `formatCurrency`/`formatPercent`/`formatSignedCurrency` are needed by
+  `PortfolioTable` now and will be needed by `NewsFeed`'s relative-timestamp
+  formatting in commit 8 — putting them in one shared file avoids the same
+  `Intl.NumberFormat` setup (and the "is this positive number supposed to
+  get a `+` sign" logic) being duplicated and potentially drifting between
+  components. Small, deliberate deviation from the literal file list, not
+  an unplanned addition.
+
+- **`PortfolioRow` (in `lib/types.ts`) is `Holding & Partial<Omit<PriceUpdate, "type" | "ticker">>`**
+  — a holding merged with whatever live fields have arrived for it, all
+  optional. A row exists in the table the moment `GET /portfolio` resolves,
+  but its price/P&L fields don't exist until the first `price_update` tick
+  for that ticker arrives over the WebSocket; making them optional (rather
+  than, say, defaulting price to `0`) lets the table render an explicit
+  "—" placeholder instead of a misleading `$0.00`/`0.00%` that looks like a
+  real (and alarming) loss.
+
+- **The portfolio `useReducer` only handles `SET_HOLDINGS`, `REMOVE_HOLDING`,
+  and `PRICE_UPDATE` in this commit — no `ADD_HOLDING` action yet.**
+  Optimistic add (spec: "On submit: POST to /portfolio/add, optimistically
+  add to UI") belongs to `AddTickerForm`, which is commit 9. Adding the
+  action now with nothing to dispatch it would be dead code sitting in the
+  reducer.
+
+- **News state is deliberately *not* wired up here, even though `lastMessage`
+  already carries `news_update` messages too.** The spec calls out
+  `useReducer` specifically for portfolio state; news is a simple
+  prepend-and-cap-at-20 operation that doesn't need reducer machinery.
+  Handling both message types in this commit would tangle two components'
+  concerns together — the right column renders a "Coming soon" placeholder
+  until `NewsFeed` (commit 8) replaces it with the real thing and its own
+  message handling.
+
+- **`REMOVE_HOLDING` is optimistic**: the reducer removes the row
+  immediately, then `DELETE /portfolio/{ticker}` fires without blocking the
+  UI on its result. A failed delete isn't specially handled — the row would
+  simply reappear on the next full `/portfolio` refetch (there isn't one on
+  a timer yet, so today a failed delete's row silently doesn't come back;
+  acceptable for now since the spec doesn't ask for a reconciliation
+  mechanism, but worth knowing if delete reliability becomes a problem).
+
+- **`PRICE_UPDATE` drops ticks for tickers no longer in `state`.** This
+  mirrors `WebSocketManager.on_quote`'s identical guard on the backend
+  (commit 3) for the same reason: a quote can arrive for a ticker between
+  its removal and the backend's unsubscribe taking effect. Keeping both
+  sides defensive means neither has to assume the other's race window is
+  fully closed.
+
+- **Removed the `create-next-app` starter markup from `app/page.tsx`
+  entirely** (the Next.js logo, "Deploy now" / "Read our docs" links,
+  footer) rather than leaving it commented out or partially replaced —
+  none of it does anything useful once real content exists, and dead
+  starter markup left in place tends to look like an oversight rather than
+  an intentional stub.
+
+- **Verification:** `npx tsc --noEmit` and `npx eslint` pass clean. Ran
+  `npm run dev` and confirmed via `curl` that the server-rendered HTML
+  contains the expected structure (title, Total Value/P&L labels, the
+  "No holdings yet" empty state, both column headers) with a clean `200`
+  and no compile/runtime errors in the dev server log. No backend was
+  running, so this only exercises the empty-portfolio / WebSocket-still-
+  connecting path — the live-update path (a real `price_update` tick
+  actually repainting a row) will get exercised once there's a way to add
+  a holding (commit 9) and a backend running against real Alpaca
+  credentials. Also could not visually screenshot the page — no headless
+  browser tool was available in this environment — so light/dark styling
+  and exact layout were verified by reading the rendered HTML/Tailwind
+  classes, not by eye.

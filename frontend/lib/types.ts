@@ -31,3 +31,11 @@ export type NewsItem = {
 };
 
 export type WSMessage = PriceUpdate | NewsItem;
+
+// A holding merged with whatever live price data has arrived for it so
+// far. The price fields are optional because a holding exists in the
+// table (from GET /portfolio) before its first `price_update` tick
+// arrives — the row renders with placeholders until then.
+export type PortfolioRow = Holding &
+  Partial<Omit<PriceUpdate, "type" | "ticker">>;
+

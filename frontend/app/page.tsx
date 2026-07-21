@@ -1,103 +1,136 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useReducer } from "react";
+
+import PortfolioTable from "./components/PortfolioTable";
+import { useWebSocket } from "@/lib/websocket";
+import type { Holding, PortfolioRow, PriceUpdate } from "@/lib/types";
+import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws";
+
+type PortfolioState = Record<string, PortfolioRow>;
+
+type PortfolioAction =
+  | { type: "SET_HOLDINGS"; holdings: Holding[] }
+  | { type: "REMOVE_HOLDING"; ticker: string }
+  | { type: "PRICE_UPDATE"; update: PriceUpdate };
+
+function portfolioReducer(state: PortfolioState, action: PortfolioAction): PortfolioState {
+  switch (action.type) {
+    case "SET_HOLDINGS": {
+      // Merge rather than replace wholesale: a price_update can arrive
+      // and populate live fields before this resolves, so blowing away
+      // existing rows here would discard ticks the table already has.
+      const next: PortfolioState = {};
+      for (const holding of action.holdings) {
+        next[holding.ticker] = { ...state[holding.ticker], ...holding };
+      }
+      return next;
+    }
+    case "REMOVE_HOLDING": {
+      if (!(action.ticker in state)) return state;
+      const next = { ...state };
+      delete next[action.ticker];
+      return next;
+    }
+    case "PRICE_UPDATE": {
+      const existing = state[action.update.ticker];
+      // A tick for a ticker not currently in the table — e.g. it arrived
+      // just after removal, before the unsubscribe took effect on the
+      // backend. Dropping it here mirrors the backend's own stale-tick
+      // handling (websocket_manager.py, commit 3).
+      if (!existing) return state;
+      return { ...state, [action.update.ticker]: { ...existing, ...action.update } };
+    }
+    default:
+      return state;
+  }
+}
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [portfolio, dispatch] = useReducer(portfolioReducer, {});
+  const { lastMessage } = useWebSocket(WS_URL);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_URL}/portfolio`)
+      .then((res) => res.json())
+      .then((holdings: Holding[]) => {
+        if (!cancelled) dispatch({ type: "SET_HOLDINGS", holdings });
+      })
+      .catch(() => {
+        // Swallow — the table just stays empty until the next successful
+        // fetch or an add. Nothing actionable to do client-side here.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (lastMessage?.type === "price_update") {
+      dispatch({ type: "PRICE_UPDATE", update: lastMessage });
+    }
+  }, [lastMessage]);
+
+  async function handleRemove(ticker: string) {
+    dispatch({ type: "REMOVE_HOLDING", ticker });
+    try {
+      await fetch(`${API_URL}/portfolio/${ticker}`, { method: "DELETE" });
+    } catch {
+      // The optimistic removal already updated the UI; a failed DELETE
+      // will just mean the ticker reappears on the next full refetch.
+    }
+  }
+
+  const rows = Object.values(portfolio).sort((a, b) => a.ticker.localeCompare(b.ticker));
+  const totalValue = rows.reduce((sum, row) => sum + (row.position_value ?? 0), 0);
+  const totalPnl = rows.reduce((sum, row) => sum + (row.position_pnl ?? 0), 0);
+  const totalCostBasis = rows.reduce((sum, row) => sum + row.avg_cost * row.quantity, 0);
+  const totalPnlPct = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
+
+  return (
+    <div className="mx-auto max-w-6xl px-6 py-10">
+      <header className="mb-8">
+        <h1 className="text-2xl font-semibold">PortfolioLive</h1>
+        <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+          15-minute delayed prices via Alpaca (IEX feed, free tier).
+        </p>
+        <div className="mt-4 flex gap-8">
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Value</div>
+            <div className="text-xl font-semibold tabular-nums">
+              {rows.length > 0 ? formatCurrency(totalValue) : "—"}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Total P&amp;L</div>
+            <div
+              className={`text-xl font-semibold tabular-nums ${
+                totalPnl >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
+              }`}
+            >
+              {rows.length > 0
+                ? `${formatSignedCurrency(totalPnl)} (${formatPercent(totalPnlPct)})`
+                : "—"}
+            </div>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </header>
+
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
+        <section>
+          <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Holdings</h2>
+          <PortfolioTable rows={rows} onRemove={handleRemove} />
+        </section>
+
+        <aside>
+          <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">News</h2>
+          <p className="text-sm text-neutral-500 dark:text-neutral-400">Coming soon.</p>
+        </aside>
+      </div>
     </div>
   );
 }
