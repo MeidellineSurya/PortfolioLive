@@ -629,3 +629,62 @@ frontend work.
   untested against real GitHub Actions (no push to a remote yet) — the
   commands it runs are verified, but the YAML syntax and trigger
   configuration are not.
+
+---
+
+## Commit 8 — News feed component
+
+**Files:** `frontend/app/components/NewsFeed.tsx`, `frontend/app/page.tsx`, `frontend/lib/format.ts` (`formatRelativeTime`)
+
+- **News state uses `useState`, not `useReducer`, as flagged as the plan
+  back in commit 7's log.** The only operation is "prepend one item, cap at
+  20" (`[lastMessage, ...prev].slice(0, MAX_NEWS_ITEMS)`) — a single state
+  transition, not several action types coordinating shared state the way
+  the portfolio reducer does. Confirming that call now that it's actually
+  implemented: a reducer here would be a wrapper around one line with no
+  organizational benefit.
+
+- **The WS message effect now branches on `lastMessage.type`** to route
+  `price_update` to the portfolio reducer and `news_update` to the news
+  `setState`, replacing the price-only check from commit 7. Both message
+  types share the same `lastMessage` value from `useWebSocket` (there's
+  only one), so this dispatch point was always going to need to exist
+  somewhere — putting it here, right where the message arrives, keeps
+  `NewsFeed` and `PortfolioTable` themselves free of any WebSocket
+  awareness; they just render whatever props they're given.
+
+- **List key is `${item.ticker}-${item.url}`, not `item.url` alone.** The
+  backend broadcasts one `news_update` per (ticker, article) pair
+  (`news_service.py`, commit 5) — an article mentioning both AAPL and MSFT
+  produces two separate messages with the same `url` but different
+  `ticker`. Using `url` alone as the key would collide and make React
+  drop one of the two entries.
+
+- **Headline links out (`target="_blank"`) using the AI summary as the
+  link text, not the raw headline.** Per spec: "Show AI summary
+  prominently, headline below in muted text." The summary is the thing
+  users actually read; making it the clickable element (rather than a
+  separate "read more" link) means clicking the most-read line of text is
+  what people would try first anyway.
+
+- **`formatRelativeTime` buckets to minutes/hours/days** (`"3 min ago"`,
+  `"2h ago"`, `"1d ago"`) rather than using `Intl.RelativeTimeFormat`.
+  The built-in formatter needs to be told which unit to use — you can't
+  hand it a raw millisecond delta and get "the right" granularity back —
+  so using it directly would need close to the same bucketing logic this
+  already has, just to feed it the right unit. Not worth pulling in a second
+  approach for the same amount of code.
+
+- **Verification:** `npx tsc --noEmit` and `npx eslint` clean on the new
+  and changed files. `npm run build` still succeeds (production build,
+  same 2 static routes). Started the dev server fresh and confirmed via
+  `curl` that the server-rendered HTML includes the new empty-state copy
+  ("No news yet — items appear here..."). As with commit 7: no backend was
+  connected during this particular check and no headless browser was
+  available, so the actual live path — a real `news_update` frame arriving
+  over the WebSocket and `NewsFeed` re-rendering with a real item — was not
+  visually observed in a browser. It was, however, indirectly exercised:
+  the backend's live-testing session (commit 7a) confirmed real
+  `news_update` messages broadcast correctly over `/ws` with the exact
+  shape `NewsFeed` expects, via a raw WebSocket test script rather than
+  this UI.

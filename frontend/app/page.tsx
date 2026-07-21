@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 
+import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
 import { useWebSocket } from "@/lib/websocket";
-import type { Holding, PortfolioRow, PriceUpdate } from "@/lib/types";
+import type { Holding, NewsItem, PortfolioRow, PriceUpdate } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws";
+const MAX_NEWS_ITEMS = 20;
 
 type PortfolioState = Record<string, PortfolioRow>;
 
@@ -51,6 +53,7 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
 
 export default function Home() {
   const [portfolio, dispatch] = useReducer(portfolioReducer, {});
+  const [news, setNews] = useState<NewsItem[]>([]);
   const { lastMessage } = useWebSocket(WS_URL);
 
   useEffect(() => {
@@ -70,8 +73,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (lastMessage?.type === "price_update") {
+    if (!lastMessage) return;
+    if (lastMessage.type === "price_update") {
       dispatch({ type: "PRICE_UPDATE", update: lastMessage });
+    } else if (lastMessage.type === "news_update") {
+      setNews((prev) => [lastMessage, ...prev].slice(0, MAX_NEWS_ITEMS));
     }
   }, [lastMessage]);
 
@@ -128,7 +134,7 @@ export default function Home() {
 
         <aside>
           <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">News</h2>
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">Coming soon.</p>
+          <NewsFeed items={news} />
         </aside>
       </div>
     </div>
