@@ -65,10 +65,13 @@ why the Docker `CMD` needs `exec`, and so on — is in
   next tick)
 - Portfolio table with a 20-point sparkline per holding
 - Add / remove holdings, with optimistic UI updates
-- AI-summarised news (one sentence, market-focused) per holding, with
-  ticker tabs to filter and "Load more" to page further back in history
-- Price alerts — set a target, get a toast when it crosses; fired alerts
-  stay visible instead of disappearing
+- Watchlist — track a ticker's live price and news without owning it;
+  doesn't count toward P&L, auto-migrates to your holdings if you buy it
+- AI-summarised news (one sentence, market-focused) per holding or
+  watchlist ticker, with ticker tabs to filter and "Load more" to page
+  further back in history
+- Price alerts (on holdings or watchlist tickers) — set a target, get a
+  toast when it crosses; fired alerts stay visible instead of disappearing
 - Portfolio analytics (`/analytics`) — total return, 30-day P&L% history,
   best/worst performer (7d), a chart per holding
 - Prometheus `/metrics` — active WebSocket connections, Groq call count,
@@ -191,14 +194,17 @@ instead — browsers can't set custom headers on a WS handshake).
 | `GET` | `/metrics` | Prometheus metrics (unauthenticated) |
 | `POST` | `/auth/login` | `{username, password}` → `{access_token, token_type}` |
 | `GET` | `/portfolio` | Current holdings, with last-known price if available |
-| `POST` | `/portfolio/add` | Add/update a holding (`{ticker, quantity, avg_cost}`) |
+| `POST` | `/portfolio/add` | Add/update a holding (`{ticker, quantity, avg_cost}`) — removes it from the watchlist if present |
 | `DELETE` | `/portfolio/{ticker}` | Remove a holding (and its alerts) |
+| `GET` | `/watchlist` | Watched tickers, with last-known price/change if available |
+| `POST` | `/watchlist/add` | Watch a ticker (`{ticker}`) — must not already be a holding |
+| `DELETE` | `/watchlist/{ticker}` | Stop watching a ticker (and its alerts) |
 | `GET` | `/news/{ticker}?before=&limit=` | Page further back into a ticker's news |
 | `GET` | `/alerts` | List price alerts |
-| `POST` | `/alerts` | Create an alert (`{ticker, target_price}`) — ticker must be held |
+| `POST` | `/alerts` | Create an alert (`{ticker, target_price}`) — ticker must be a holding or watched |
 | `DELETE` | `/alerts/{alert_id}` | Remove an alert |
 | `GET` | `/analytics?days=` | Total return, P&L history, best/worst performer (7d) |
-| `WS` | `/ws?token=` | Live `price_update` / `news_update` / `price_alert` events |
+| `WS` | `/ws?token=` | Live `price_update` / `watchlist_price_update` / `news_update` / `price_alert` events |
 
 ## Known constraints
 

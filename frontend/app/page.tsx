@@ -7,9 +7,20 @@ import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
 import ToastStack, { type ToastMessage } from "./components/Toast";
+import WatchlistSection from "./components/Watchlist";
 import { authFetch, clearToken, getToken, useRequireAuth } from "@/lib/auth";
 import { useWebSocket } from "@/lib/websocket";
-import type { Holding, HoldingWithPrice, NewsItem, PortfolioRow, PriceAlert, PriceUpdate } from "@/lib/types";
+import type {
+  Holding,
+  HoldingWithPrice,
+  NewsItem,
+  PortfolioRow,
+  PriceAlert,
+  PriceUpdate,
+  WatchlistItem,
+  WatchlistRow,
+  WatchlistPriceUpdate,
+} from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -65,9 +76,58 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
   }
 }
 
+type WatchlistState = Record<string, WatchlistRow>;
+
+type WatchlistAction =
+  | { type: "SET_WATCHLIST"; items: WatchlistItem[] }
+  | { type: "ADD_TICKER"; ticker: string }
+  | { type: "REMOVE_TICKER"; ticker: string }
+  | { type: "WATCHLIST_PRICE_UPDATE"; update: WatchlistPriceUpdate };
+
+// A near-mirror of portfolioReducer above — same shape of problem (set
+// from a fetch, optimistic add/remove, merge in live ticks) — kept as its
+// own reducer rather than folded into portfolioReducer, since a watchlist
+// entry and a holding are different enough types (no quantity/avg_cost,
+// no P&L) that a single combined state shape would need every consumer
+// to check which kind of row it's looking at.
+function watchlistReducer(state: WatchlistState, action: WatchlistAction): WatchlistState {
+  switch (action.type) {
+    case "SET_WATCHLIST": {
+      const next: WatchlistState = {};
+      for (const item of action.items) {
+        next[item.ticker] = { ...state[item.ticker], ...item };
+      }
+      return next;
+    }
+    case "ADD_TICKER": {
+      // Optimistic: unlike an alert (server-generated id), a watchlist
+      // entry's only identity is the ticker itself, which the client
+      // already knows before the request completes.
+      if (action.ticker in state) return state;
+      return { ...state, [action.ticker]: { ticker: action.ticker } };
+    }
+    case "REMOVE_TICKER": {
+      if (!(action.ticker in state)) return state;
+      const next = { ...state };
+      delete next[action.ticker];
+      return next;
+    }
+    case "WATCHLIST_PRICE_UPDATE": {
+      const existing = state[action.update.ticker];
+      // Same stale-tick guard as PRICE_UPDATE above, for the same reason.
+      if (!existing) return state;
+      const priceHistory = [...(existing.priceHistory ?? []), action.update.price].slice(-MAX_PRICE_HISTORY);
+      return { ...state, [action.update.ticker]: { ...existing, ...action.update, priceHistory } };
+    }
+    default:
+      return state;
+  }
+}
+
 export default function Home() {
   const ready = useRequireAuth();
   const [portfolio, dispatch] = useReducer(portfolioReducer, {});
+  const [watchlist, watchlistDispatch] = useReducer(watchlistReducer, {});
   const [news, setNews] = useState<NewsItem[]>([]);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -94,6 +154,22 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    authFetch(`${API_URL}/watchlist`)
+      .then((res) => res.json())
+      .then((items: WatchlistItem[]) => {
+        if (!cancelled) watchlistDispatch({ type: "SET_WATCHLIST", items });
+      })
+      .catch(() => {
+        // Same as the portfolio fetch above — stays empty until the next
+        // successful load.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     authFetch(`${API_URL}/alerts`)
       .then((res) => res.json())
       .then((data: PriceAlert[]) => {
@@ -112,6 +188,8 @@ export default function Home() {
     if (!lastMessage) return;
     if (lastMessage.type === "price_update") {
       dispatch({ type: "PRICE_UPDATE", update: lastMessage });
+    } else if (lastMessage.type === "watchlist_price_update") {
+      watchlistDispatch({ type: "WATCHLIST_PRICE_UPDATE", update: lastMessage });
     } else if (lastMessage.type === "news_update") {
       setNews((prev) => [lastMessage, ...prev].slice(0, MAX_NEWS_ITEMS));
     } else if (lastMessage.type === "price_alert") {
@@ -155,6 +233,31 @@ export default function Home() {
     }
   }
 
+  function handleAddToWatchlist(ticker: string) {
+    watchlistDispatch({ type: "ADD_TICKER", ticker });
+    authFetch(`${API_URL}/watchlist/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    })
+      .then((res) => {
+        // Same reasoning as handleAdd (commit 7): a failed add leaves a
+        // row that will never receive a price tick if left in place.
+        if (!res.ok) watchlistDispatch({ type: "REMOVE_TICKER", ticker });
+      })
+      .catch(() => watchlistDispatch({ type: "REMOVE_TICKER", ticker }));
+  }
+
+  async function handleRemoveFromWatchlist(ticker: string) {
+    watchlistDispatch({ type: "REMOVE_TICKER", ticker });
+    try {
+      await authFetch(`${API_URL}/watchlist/${ticker}`, { method: "DELETE" });
+    } catch {
+      // Optimistic removal already updated the UI; a failed DELETE just
+      // means it reappears on the next watchlist refetch.
+    }
+  }
+
   async function handleSetAlert(ticker: string, targetPrice: number) {
     try {
       const res = await authFetch(`${API_URL}/alerts`, {
@@ -191,6 +294,7 @@ export default function Home() {
   if (!ready) return null;
 
   const rows = Object.values(portfolio).sort((a, b) => a.ticker.localeCompare(b.ticker));
+  const watchlistRows = Object.values(watchlist).sort((a, b) => a.ticker.localeCompare(b.ticker));
   const totalValue = rows.reduce((sum, row) => sum + (row.position_value ?? 0), 0);
   const totalPnl = rows.reduce((sum, row) => sum + (row.position_pnl ?? 0), 0);
   const totalCostBasis = rows.reduce((sum, row) => sum + row.avg_cost * row.quantity, 0);
@@ -246,21 +350,40 @@ export default function Home() {
       </header>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
-        <section>
-          <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Holdings</h2>
-          <AddTickerForm onAdd={handleAdd} />
-          <PortfolioTable
-            rows={rows}
-            alerts={alerts}
-            onRemove={handleRemove}
-            onSetAlert={handleSetAlert}
-            onDeleteAlert={handleDeleteAlert}
-          />
-        </section>
+        <div className="space-y-10">
+          <section>
+            <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Holdings</h2>
+            <AddTickerForm onAdd={handleAdd} />
+            <PortfolioTable
+              rows={rows}
+              alerts={alerts}
+              onRemove={handleRemove}
+              onSetAlert={handleSetAlert}
+              onDeleteAlert={handleDeleteAlert}
+            />
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">
+              Watchlist
+            </h2>
+            <p className="mb-3 text-xs text-neutral-500 dark:text-neutral-400">
+              Live prices and news, without counting toward your P&amp;L.
+            </p>
+            <WatchlistSection
+              rows={watchlistRows}
+              onAdd={handleAddToWatchlist}
+              onRemove={handleRemoveFromWatchlist}
+            />
+          </section>
+        </div>
 
         <aside>
           <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">News</h2>
-          <NewsFeed items={news} tickers={rows.map((row) => row.ticker)} />
+          <NewsFeed
+            items={news}
+            tickers={[...rows.map((row) => row.ticker), ...watchlistRows.map((row) => row.ticker)]}
+          />
         </aside>
       </div>
 

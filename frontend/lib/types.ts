@@ -52,7 +52,37 @@ export type PriceAlertTriggered = {
   direction: "above" | "below";
 };
 
-export type WSMessage = PriceUpdate | NewsItem | PriceAlertTriggered;
+// A ticker tracked for price/news but not owned — no P&L fields exist at
+// all here (not even optionally), unlike PriceUpdate: a watchlist ticker
+// has no quantity/avg_cost, so "profit or loss" isn't a question with an
+// answer for it. Kept as its own WS message type rather than PriceUpdate
+// with optional position_* fields, so every existing `price_update`
+// consumer (the portfolio reducer, PortfolioTable) can keep assuming a
+// real position backs every message it receives.
+export type WatchlistPriceUpdate = {
+  type: "watchlist_price_update";
+  ticker: string;
+  price: number;
+  change: number;
+  change_pct: number;
+};
+
+export type WSMessage = PriceUpdate | NewsItem | PriceAlertTriggered | WatchlistPriceUpdate;
+
+// GET /watchlist's response shape (backend/models.py's WatchlistItemWithPrice).
+export type WatchlistItem = {
+  ticker: string;
+  price?: number;
+  change?: number;
+  change_pct?: number;
+};
+
+// A watchlist item merged with live price data, same "optional until the
+// first tick" reasoning as PortfolioRow below — plus client-only
+// `priceHistory` for its sparkline.
+export type WatchlistRow = WatchlistItem & {
+  priceHistory?: number[];
+};
 
 export type PriceAlert = {
   id: string;

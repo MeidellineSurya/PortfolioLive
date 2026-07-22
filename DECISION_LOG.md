@@ -1621,3 +1621,54 @@ just adding storage for the tickers themselves.
   `NewsService._get_tracked_tickers` returns the union of both stores
   against real Redis data. Checked the container's logs after all of the
   above — no errors.
+
+---
+
+## Commit 23 — Watchlist mode (frontend) + README updates
+
+**Files:** `frontend/app/components/Watchlist.tsx`, `frontend/app/page.tsx`, `frontend/lib/types.ts`, `README.md`
+
+- **A second `useReducer` (`watchlistReducer`), not a shared reducer with
+  `portfolioReducer` and not folded into the same state shape.** The two
+  nearly mirror each other structurally (set-from-fetch, optimistic
+  add/remove, merge-in-live-ticks), but a holding and a watchlist row are
+  different enough types — no `quantity`/`avg_cost`, no P&L fields at all
+  — that combining them into one reducer would mean every piece of code
+  reading that state has to branch on which kind of row it's looking at.
+  Two reducers, two clearly-typed states, no branching needed anywhere
+  that consumes them.
+
+- **Adding a ticker to the watchlist is optimistic (unlike setting an
+  alert, commit 16, which isn't).** The two client-generated-vs-server-
+  generated-identity cases are different: a watchlist entry's whole
+  identity *is* the ticker string, which the client already has before
+  the request completes — nothing to reconcile once the response arrives.
+  An alert's identity is a server-generated UUID the client can't predict.
+
+- **The watchlist section sits in the same left column as Holdings, not
+  the right column with News**, even though the pitch described it as "a
+  separate section." Splitting Holdings and Watchlist across two columns
+  would visually pair Watchlist with News instead of Holdings, when the
+  two tables (holdings, watchlist) are the more natural pair — both are
+  "things with tickers and live prices," while News is a different kind
+  of content entirely.
+
+- **`NewsFeed`'s `tickers` prop now receives both portfolio and watchlist
+  tickers** (`[...rows, ...watchlistRows].map(...)`) so a watchlist
+  ticker gets its own filter tab — no change needed inside `NewsFeed`
+  itself, since `page.tsx` already forwards every `news_update` message
+  regardless of source; only the tab list needed widening.
+
+- **README updated again in the same commit** (Features, API reference,
+  Known constraints untouched — none of the existing caveats needed
+  revising for this feature) rather than deferred, same reasoning as
+  commit 21: a reader hitting the API table should see all 15 real
+  routes, not the 12 that existed before this feature.
+
+- **Verification:** `tsc`/`eslint` clean, production build succeeds with
+  all three routes unchanged in count (watchlist is a new section on the
+  existing dashboard route, not a new page). Confirmed via the real
+  backend (commit 22) that the exact requests `handleAddToWatchlist`/
+  `handleRemoveFromWatchlist` produce succeed end-to-end. As with every
+  frontend commit this session, did not visually confirm the rendered
+  watchlist table/sparklines in an actual browser.
