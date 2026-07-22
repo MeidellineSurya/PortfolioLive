@@ -7,6 +7,7 @@ import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
 import PortfolioTable from "./components/PortfolioTable";
 import ToastStack, { type ToastMessage } from "./components/Toast";
+import { authFetch, clearToken, getToken, useRequireAuth } from "@/lib/auth";
 import { useWebSocket } from "@/lib/websocket";
 import type { Holding, HoldingWithPrice, NewsItem, PortfolioRow, PriceAlert, PriceUpdate } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
@@ -65,15 +66,19 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
 }
 
 export default function Home() {
+  const ready = useRequireAuth();
   const [portfolio, dispatch] = useReducer(portfolioReducer, {});
   const [news, setNews] = useState<NewsItem[]>([]);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const { lastMessage } = useWebSocket(WS_URL);
+  // The browser WebSocket API can't set an Authorization header, so the
+  // token travels as a query param instead (backend/main.py's /ws route
+  // reads it from there) — see commit 20's decision log for why.
+  const { lastMessage } = useWebSocket(`${WS_URL}?token=${getToken() ?? ""}`);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_URL}/portfolio`)
+    authFetch(`${API_URL}/portfolio`)
       .then((res) => res.json())
       .then((holdings: HoldingWithPrice[]) => {
         if (!cancelled) dispatch({ type: "SET_HOLDINGS", holdings });
@@ -89,7 +94,7 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_URL}/alerts`)
+    authFetch(`${API_URL}/alerts`)
       .then((res) => res.json())
       .then((data: PriceAlert[]) => {
         if (!cancelled) setAlerts(data);
@@ -124,7 +129,7 @@ export default function Home() {
 
   function handleAdd(holding: Holding) {
     dispatch({ type: "ADD_HOLDING", holding });
-    fetch(`${API_URL}/portfolio/add`, {
+    authFetch(`${API_URL}/portfolio/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(holding),
@@ -143,7 +148,7 @@ export default function Home() {
     dispatch({ type: "REMOVE_HOLDING", ticker });
     setAlerts((prev) => prev.filter((alert) => alert.ticker !== ticker));
     try {
-      await fetch(`${API_URL}/portfolio/${ticker}`, { method: "DELETE" });
+      await authFetch(`${API_URL}/portfolio/${ticker}`, { method: "DELETE" });
     } catch {
       // The optimistic removal already updated the UI; a failed DELETE
       // will just mean the ticker reappears on the next full refetch.
@@ -152,7 +157,7 @@ export default function Home() {
 
   async function handleSetAlert(ticker: string, targetPrice: number) {
     try {
-      const res = await fetch(`${API_URL}/alerts`, {
+      const res = await authFetch(`${API_URL}/alerts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticker, target_price: targetPrice }),
@@ -172,13 +177,18 @@ export default function Home() {
   async function handleDeleteAlert(id: string) {
     setAlerts((prev) => prev.filter((alert) => alert.id !== id));
     try {
-      await fetch(`${API_URL}/alerts/${id}`, { method: "DELETE" });
+      await authFetch(`${API_URL}/alerts/${id}`, { method: "DELETE" });
     } catch {
       // Optimistic removal already updated the UI; a failed DELETE just
       // means it reappears on the next alerts refetch (there isn't one
       // on a timer today — same accepted tradeoff as handleRemove).
     }
   }
+
+  // Rendered nothing until confirmed logged in, rather than gated
+  // earlier — the hooks above still all need to run unconditionally on
+  // every render (Rules of Hooks), so the gate can only take effect here.
+  if (!ready) return null;
 
   const rows = Object.values(portfolio).sort((a, b) => a.ticker.localeCompare(b.ticker));
   const totalValue = rows.reduce((sum, row) => sum + (row.position_value ?? 0), 0);
@@ -191,12 +201,24 @@ export default function Home() {
       <header className="mb-8">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">PortfolioLive</h1>
-          <Link
-            href="/analytics"
-            className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300"
-          >
-            Analytics →
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link
+              href="/analytics"
+              className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300"
+            >
+              Analytics →
+            </Link>
+            <button
+              type="button"
+              onClick={() => {
+                clearToken();
+                window.location.href = "/login";
+              }}
+              className="text-sm font-medium text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+            >
+              Log out
+            </button>
+          </div>
         </div>
         <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
           15-minute delayed prices via Alpaca (IEX feed, free tier).

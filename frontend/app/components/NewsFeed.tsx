@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { authFetch } from "@/lib/auth";
 import type { NewsItem } from "@/lib/types";
 import { formatRelativeTime } from "@/lib/format";
 
@@ -51,7 +52,7 @@ export default function NewsFeed({ items, tickers }: NewsFeedProps) {
       const params = new URLSearchParams({ limit: String(LOAD_MORE_LIMIT) });
       if (oldest) params.set("before", oldest.published_at);
 
-      const res = await fetch(`${API_URL}/news/${selectedTicker}?${params.toString()}`);
+      const res = await authFetch(`${API_URL}/news/${selectedTicker}?${params.toString()}`);
       if (!res.ok) throw new Error(`request failed: ${res.status}`);
 
       const more: NewsItem[] = await res.json();

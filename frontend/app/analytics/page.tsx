@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { authFetch, useRequireAuth } from "@/lib/auth";
 import type { AnalyticsResponse, PortfolioSnapshot } from "@/lib/types";
 import { formatPercent, formatSignedCurrency } from "@/lib/format";
 
@@ -36,12 +37,13 @@ function buildTickerSeries(history: PortfolioSnapshot[], ticker: string) {
 }
 
 export default function AnalyticsPage() {
+  const ready = useRequireAuth();
   const [data, setData] = useState<AnalyticsResponse | null>(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_URL}/analytics?days=${HISTORY_DAYS}`)
+    authFetch(`${API_URL}/analytics?days=${HISTORY_DAYS}`)
       .then((res) => res.json())
       .then((result: AnalyticsResponse) => {
         if (!cancelled) setData(result);
@@ -53,6 +55,8 @@ export default function AnalyticsPage() {
       cancelled = true;
     };
   }, []);
+
+  if (!ready) return null;
 
   const chartData = (data?.history ?? []).map((snapshot) => ({
     timestamp: snapshot.timestamp,

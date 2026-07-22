@@ -1463,3 +1463,74 @@ last real price from earlier in the day (or an earlier session).
   above) and confirmed accepted with a valid one. Checked the container's
   own logs after each step to confirm every rejection was a clean,
   intentional refusal — no unhandled exceptions anywhere in the auth path.
+
+---
+
+## Commit 21 — Single-user JWT auth (frontend) + README updates
+
+**Files:** `frontend/lib/auth.ts`, `frontend/app/login/page.tsx`, `frontend/app/page.tsx`, `frontend/app/analytics/page.tsx`, `frontend/app/components/NewsFeed.tsx`, `README.md`
+
+- **Token storage is `localStorage`, not an httpOnly cookie.** A cookie
+  would be more resistant to XSS, but the frontend (Vercel) and backend
+  (Railway) are different origins — an httpOnly cookie set by the backend
+  would need cross-site cookie config (`SameSite=None; Secure`, and the
+  backend deciding the cookie's domain) that adds real complexity for a
+  single-user personal dashboard, not a multi-tenant product where
+  session-theft blast radius matters more. Named explicitly as a
+  simplicity-over-hardening tradeoff, not an oversight.
+
+- **`useRequireAuth`'s check runs inside a `useEffect`, and the token read
+  itself is synchronous (`localStorage.getItem`) — it's not "async" in
+  the sense of needing to be awaited, but it still can't run during the
+  first render.** Next.js renders this "use client" component's first
+  pass on the server, where `window` doesn't exist and `getToken()`
+  correctly returns `null` (guarded) rather than throwing — but checking
+  during render and redirecting from there would either act on that false
+  "no token" reading, or cause a server/client hydration mismatch if it
+  tried to render different output on each side. The effect defers the
+  check to after hydration, when `localStorage` reflects reality.
+
+- **Every page gated by `useRequireAuth` still calls all its other hooks
+  unconditionally, and only returns `null` afterward** (`if (!ready)
+  return null` placed right before the JSX, not before the hook calls
+  above it). Rules of Hooks: hook calls can't be conditional on `ready`
+  itself, since `ready` is *produced by* one of those hooks.
+
+- **The WebSocket URL gets `?token=` appended in `page.tsx` (the only
+  place `useWebSocket` is called), not inside the hook itself.** The hook
+  (commit 6) has no reason to know what a "token" is — it takes a URL and
+  manages a connection to it; auth is a concern of the one caller that
+  needs it; passing a fully-formed URL keeps the hook's contract exactly
+  as narrow as it was before this feature existed. `useWebSocket`'s
+  internal effect keys off the URL string's value, so recomputing the
+  same string across re-renders (as long as the token hasn't changed)
+  doesn't trigger a spurious reconnect.
+
+- **A `Log out` button was added even though it wasn't explicitly asked
+  for.** A login flow with no way to end the session is an incomplete
+  loop — this is the same class of "obviously implied by what was
+  requested" addition as the remove button on `AddTickerForm`'s row back
+  in commit 7, not scope creep.
+
+- **README updated in the same commit, not deferred.** The architecture
+  diagram (commit 14) predates alerts, analytics, metrics, and now auth
+  entirely — the Features list, API reference table, env var
+  instructions, and Security section were all stale enough to actively
+  mislead a new reader (the API table was still missing 6 of the 14 real
+  routes). Left the Mermaid diagram itself unchanged: auth is a request-
+  level gate applied uniformly across the existing data flow, not a new
+  pipeline — annotating every edge with "requires a token" would add
+  visual noise without adding information a reader doesn't already get
+  from the new "API reference" note above the table.
+
+- **Verification:** `tsc`/`eslint` clean, production build succeeds with
+  all three routes (`/`, `/analytics`, `/login`) generated. Confirmed via
+  `curl` that the dashboard's SSR output contains no dashboard content
+  (title only) — the `if (!ready) return null` gate doing its job on the
+  very first render — and that `/login`'s SSR includes the actual form
+  fields. Did not drive an actual browser through the login → redirect →
+  authenticated-fetch loop (same constraint as every frontend commit this
+  session); the network contract each step relies on (login response
+  shape, 401 handling, `?token=` on the WS URL) was verified directly
+  against the real backend in commit 20, and the frontend code
+  implementing it type-checks and builds against that same contract.

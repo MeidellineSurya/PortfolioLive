@@ -60,11 +60,20 @@ why the Docker `CMD` needs `exec`, and so on — is in
 
 ## Features
 
-- Live price ticks and per-position P&L ($ and %) over WebSocket
+- Live price ticks and per-position P&L ($ and %) over WebSocket, with the
+  last-known price shown immediately on page load (not blank until the
+  next tick)
 - Portfolio table with a 20-point sparkline per holding
 - Add / remove holdings, with optimistic UI updates
 - AI-summarised news (one sentence, market-focused) per holding, with
   ticker tabs to filter and "Load more" to page further back in history
+- Price alerts — set a target, get a toast when it crosses; fired alerts
+  stay visible instead of disappearing
+- Portfolio analytics (`/analytics`) — total return, 30-day P&L% history,
+  best/worst performer (7d), a chart per holding
+- Prometheus `/metrics` — active WebSocket connections, Groq call count,
+  news cache hit/miss, summaries generated
+- Single-user JWT login protecting every route except `/health`/`/metrics`
 - Auto-reconnecting WebSocket client (exponential backoff, capped at 30s)
 
 ## Tech stack
@@ -120,11 +129,19 @@ DECISION_LOG.md            Every non-obvious decision, organised per commit
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, GROQ_API_KEY
+cp .env.example .env   # fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, GROQ_API_KEY,
+                        # AUTH_SECRET_KEY, AUTH_USERNAME, AUTH_PASSWORD
 uvicorn main:app --reload
 ```
 
 Runs on `http://localhost:8000`. `GET /health` should return `{"status": "ok"}`.
+
+`AUTH_USERNAME`/`AUTH_PASSWORD` only take effect once — they seed the
+single login account into Redis on first startup, not on every restart
+(see `backend/auth.py`). `AUTH_SECRET_KEY` should be a long random string
+(e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`); every
+route except `/health` and `/metrics` requires a token from
+`POST /auth/login` afterward.
 
 To also run the linter/tests locally:
 
@@ -164,14 +181,24 @@ your host machine, not `localhost`.
 
 ## API reference
 
+Every route below except `/health`, `/metrics`, and `/auth/login` requires
+`Authorization: Bearer <token>` (the WebSocket takes it as `?token=`
+instead — browsers can't set custom headers on a WS handshake).
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check |
-| `GET` | `/portfolio` | Current holdings |
+| `GET` | `/health` | Health check (unauthenticated) |
+| `GET` | `/metrics` | Prometheus metrics (unauthenticated) |
+| `POST` | `/auth/login` | `{username, password}` → `{access_token, token_type}` |
+| `GET` | `/portfolio` | Current holdings, with last-known price if available |
 | `POST` | `/portfolio/add` | Add/update a holding (`{ticker, quantity, avg_cost}`) |
-| `DELETE` | `/portfolio/{ticker}` | Remove a holding |
+| `DELETE` | `/portfolio/{ticker}` | Remove a holding (and its alerts) |
 | `GET` | `/news/{ticker}?before=&limit=` | Page further back into a ticker's news |
-| `WS` | `/ws` | Live `price_update` / `news_update` events |
+| `GET` | `/alerts` | List price alerts |
+| `POST` | `/alerts` | Create an alert (`{ticker, target_price}`) — ticker must be held |
+| `DELETE` | `/alerts/{alert_id}` | Remove an alert |
+| `GET` | `/analytics?days=` | Total return, P&L history, best/worst performer (7d) |
+| `WS` | `/ws?token=` | Live `price_update` / `news_update` / `price_alert` events |
 
 ## Known constraints
 
@@ -196,6 +223,12 @@ your host machine, not `localhost`.
 
 ## Security
 
+- Single-user JWT login (`backend/auth.py`) protects every route except
+  `/health`/`/metrics`/`/auth/login` — bearer token for REST, `?token=`
+  query param for the WebSocket handshake (browsers can't set custom
+  headers there)
+- Password hashed with bcrypt; credentials seeded from env vars once, not
+  via an open registration endpoint
 - API keys are backend-only, read from environment variables, never
   exposed to the frontend
 - CORS restricted to a single configured `FRONTEND_ORIGIN`
