@@ -1384,3 +1384,82 @@ last real price from earlier in the day (or an earlier session).
   that specific client disconnected — proving the metric moves in the
   correct direction under a known, isolated change, independent of
   whatever else happened to be connected at the time.
+
+---
+
+## Commit 20 — Single-user JWT auth (backend)
+
+**Files:** `backend/auth.py`, `backend/main.py`, `backend/models.py`, `backend/requirements.txt`, `backend/.env.example`, `backend/tests/test_auth.py`
+
+- **Credentials are bootstrapped from `AUTH_USERNAME`/`AUTH_PASSWORD` env
+  vars into Redis on startup, idempotently — not created via an open
+  `/auth/register` endpoint.** A registration endpoint reachable without
+  auth is, definitionally, a way for anyone to create or overwrite the
+  single account this app has; env-var bootstrap matches how every other
+  secret already works here (`ALPACA_API_KEY` etc.) and needs no new
+  onboarding flow for a single-user personal app. "Idempotent" is load-
+  bearing, not incidental: without the `if existing is not None: return`
+  guard, every backend restart would silently reset the password back to
+  whatever's in the env file, undoing a password rotated by editing Redis
+  directly.
+
+- **Auth is enforced at the `APIRouter` level
+  (`protected = APIRouter(dependencies=[Depends(require_auth)])`), not
+  as `dependencies=[Depends(require_auth)]` repeated on each of the 8
+  routes it covers.** A per-route opt-in is one added route away from an
+  accidental unauthenticated leak — someone adds route #9 later, forgets
+  the dependency, ships a hole. A router-level default makes "protected"
+  the thing a route has to opt *out* of (by living outside the router)
+  rather than opt into, which is the safer default direction for this
+  specific mistake to be hard to make.
+
+- **The WebSocket endpoint authenticates via a `?token=` query param, not
+  the `Authorization` header the REST routes use.** Not a stylistic
+  choice — browsers' native `WebSocket` constructor has no way to set
+  custom headers on the handshake at all, so the header pattern simply
+  isn't available here. Verified live, and worth recording precisely:
+  calling `websocket.close(code=4401, ...)` *before* `accept()` doesn't
+  send a WS close frame carrying that code to the client — Starlette/
+  uvicorn instead refuse the handshake with a plain HTTP 403, discarding
+  the custom code entirely (confirmed via `websockets` client logs: `HTTP
+  403`, not a close-frame-with-code-4401 event). The code fixes this
+  in a comment rather than in behavior, since the 403 rejection is
+  already the correct outcome — the client-observable difference just
+  isn't what a `code=4401` might suggest to a future reader.
+
+- **`HTTPBearer()`'s default `auto_error=True` means a *missing* token
+  gets FastAPI's own `403 Forbidden`, while an *invalid or expired* one
+  gets this app's own `401` from `require_auth`.** Slightly inconsistent
+  status codes for two flavors of "not authenticated," and worth knowing
+  rather than "fixing" by setting `auto_error=False` and hand-rolling the
+  missing-header case — that would just be reimplementing what FastAPI's
+  default already does correctly, to make two error codes match at the
+  cost of more code.
+
+- **Password hashing via `bcrypt` directly, JWT via `PyJWT` directly** —
+  not `passlib` (its bcrypt backend has had compatibility churn with
+  newer `bcrypt` releases) or `python-jose` (multiple JWT libraries doing
+  the same one job with different maintenance trajectories). Both chosen
+  libraries are the thing they claim to be and nothing more, which is
+  what a two-function need (`hashpw`/`checkpw`, `encode`/`decode`) here
+  actually calls for.
+
+- **Unit tests cover only `create_token`/`verify_token`** (pure — no
+  Redis I/O), including one that constructs two `AuthService`s with
+  different secrets and confirms a token signed by one is rejected by
+  the other. `bootstrap_user`/`verify_login` need a real Redis connection
+  and are covered by live verification instead, same split already used
+  throughout this backend (e.g. commit 15's alert tests).
+
+- **Verification, against the real Docker image, not just code review:**
+  confirmed the full matrix live — `GET /portfolio` with no token → `403`;
+  with a garbage token → `401`; `POST /auth/login` with a wrong password
+  → `401`; with correct credentials → a real token; that same token used
+  successfully for both a `GET` and a `POST /portfolio/add` (then cleaned
+  up); every protected route (`/alerts`, `/analytics`, `/news/{ticker}`)
+  confirmed to `403` with no token, while `/health` and `/metrics` stayed
+  open; a raw WebSocket client confirmed rejected with no token
+  (`InvalidStatus... HTTP 403`, matching the close-before-accept finding
+  above) and confirmed accepted with a valid one. Checked the container's
+  own logs after each step to confirm every rejection was a clean,
+  intentional refusal — no unhandled exceptions anywhere in the auth path.

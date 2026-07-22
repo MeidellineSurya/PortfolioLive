@@ -7,19 +7,32 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from alert_service import AlertService
 from alert_store import AlertStore
 from alpaca_client import AlpacaClient
 from analytics_service import AnalyticsService
+from auth import AuthService
 from models import (
     TICKER_RE,
     AnalyticsResponse,
     Holding,
     HoldingWithPrice,
+    LoginRequest,
+    LoginResponse,
     NewsItem,
     PriceAlert,
     PriceAlertCreate,
@@ -43,6 +56,18 @@ logging.basicConfig(
 )
 
 MAX_HOLDINGS = 50
+
+_bearer_scheme = HTTPBearer()
+
+
+async def require_auth(
+    request: Request, credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme)
+) -> str:
+    auth_service: AuthService = request.app.state.auth_service
+    username = auth_service.verify_token(credentials.credentials)
+    if username is None:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    return username
 
 
 @asynccontextmanager
@@ -73,6 +98,7 @@ async def lifespan(app: FastAPI):
     alert_store = AlertStore(os.environ["REDIS_URL"])
     alert_service = AlertService(alert_store, manager)
     analytics_service = AnalyticsService(store, manager, os.environ["REDIS_URL"])
+    auth_service = AuthService(os.environ["REDIS_URL"], os.environ["AUTH_SECRET_KEY"])
 
     # Threshold-crossing checks piggyback on every quote tick via the
     # same loosely-coupled listener hook WebSocketManager exposes for
@@ -86,9 +112,11 @@ async def lifespan(app: FastAPI):
     app.state.news_service = news_service
     app.state.alert_service = alert_service
     app.state.analytics_service = analytics_service
+    app.state.auth_service = auth_service
 
     alpaca_client.start()
     try:
+        await auth_service.bootstrap_user(os.environ["AUTH_USERNAME"], os.environ["AUTH_PASSWORD"])
         await manager.load_initial_holdings()
         news_service.start()
         analytics_service.start()
@@ -102,6 +130,7 @@ async def lifespan(app: FastAPI):
         await alpaca_client.stop()
         await store.close()
         await alert_store.close()
+        await auth_service.close()
 
 
 app = FastAPI(title="PortfolioLive API", lifespan=lifespan)
@@ -113,6 +142,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Everything that touches portfolio/news/alerts/analytics data requires a
+# valid token, applied at the router level rather than repeated as
+# `dependencies=[Depends(require_auth)]` on each of the 8 routes below —
+# a per-route opt-in is one route away from an accidental unauthenticated
+# leak every time someone adds a new one; a router-level default makes
+# "protected" the thing you'd have to opt *out* of instead.
+protected = APIRouter(dependencies=[Depends(require_auth)])
+
 
 @app.get("/health")
 async def health() -> dict:
@@ -123,12 +160,19 @@ async def health() -> dict:
 async def metrics_endpoint() -> Response:
     # Deliberately unauthenticated, same as /health — a Prometheus
     # scraper hitting this on a schedule shouldn't need a JWT any more
-    # than Railway's health checker should (see commit 19's auth work,
-    # which protects everything else).
+    # than Railway's health checker should.
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@app.get("/portfolio", response_model_exclude_none=True)
+@app.post("/auth/login")
+async def login(body: LoginRequest) -> LoginResponse:
+    auth_service: AuthService = app.state.auth_service
+    if not await auth_service.verify_login(body.username, body.password):
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    return LoginResponse(access_token=auth_service.create_token(body.username))
+
+
+@protected.get("/portfolio", response_model_exclude_none=True)
 async def get_portfolio() -> list[HoldingWithPrice]:
     # exclude_none means a holding with no known price yet omits those
     # fields from the JSON entirely, rather than sending explicit nulls —
@@ -139,7 +183,7 @@ async def get_portfolio() -> list[HoldingWithPrice]:
     return app.state.ws_manager.enrich_holdings(holdings)
 
 
-@app.post("/portfolio/add", status_code=201)
+@protected.post("/portfolio/add", status_code=201)
 async def add_holding(holding: Holding) -> Holding:
     store: PortfolioStore = app.state.store
     if await store.count_holdings() >= MAX_HOLDINGS:
@@ -150,7 +194,7 @@ async def add_holding(holding: Holding) -> Holding:
     return holding
 
 
-@app.delete("/portfolio/{ticker}", status_code=204, response_model=None)
+@protected.delete("/portfolio/{ticker}", status_code=204, response_model=None)
 async def remove_holding(ticker: str) -> None:
     ticker = ticker.strip().upper()
     if not TICKER_RE.match(ticker):
@@ -165,7 +209,7 @@ async def remove_holding(ticker: str) -> None:
     await app.state.alert_service.delete_alerts_for_ticker(ticker)
 
 
-@app.get("/news/{ticker}")
+@protected.get("/news/{ticker}")
 async def get_more_news(ticker: str, before: datetime | None = None, limit: int = 5) -> list[NewsItem]:
     """On-demand "load more" past what the 60s poll cycle already
     broadcast (news_service.py caps that at 5 per ticker per cycle).
@@ -181,13 +225,13 @@ async def get_more_news(ticker: str, before: datetime | None = None, limit: int 
     return await news_service.get_more_news(ticker, before, limit)
 
 
-@app.get("/alerts")
+@protected.get("/alerts")
 async def list_alerts() -> list[PriceAlert]:
     alert_service: AlertService = app.state.alert_service
     return await alert_service.list_alerts()
 
 
-@app.post("/alerts", status_code=201)
+@protected.post("/alerts", status_code=201)
 async def create_alert(alert: PriceAlertCreate) -> PriceAlert:
     # Alerts only ever get checked from inside WebSocketManager.on_quote
     # (via the quote-listener hook), which only fires for tickers actually
@@ -206,22 +250,41 @@ async def create_alert(alert: PriceAlertCreate) -> PriceAlert:
     return await alert_service.create_alert(alert.ticker, alert.target_price)
 
 
-@app.delete("/alerts/{alert_id}", status_code=204, response_model=None)
+@protected.delete("/alerts/{alert_id}", status_code=204, response_model=None)
 async def delete_alert(alert_id: str) -> None:
     alert_service: AlertService = app.state.alert_service
     await alert_service.delete_alert(alert_id)
 
 
-@app.get("/analytics")
+@protected.get("/analytics")
 async def get_analytics(days: int = 30) -> AnalyticsResponse:
     days = max(1, min(days, 90))
     analytics_service: AnalyticsService = app.state.analytics_service
     return await analytics_service.get_analytics(days)
 
 
+app.include_router(protected)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    manager: WebSocketManager = app.state.ws_manager
+    # Browsers' native WebSocket API can't set custom headers, so the
+    # Authorization-header pattern the REST routes use isn't available
+    # here — a `?token=` query param is the standard workaround. Checked
+    # before accept() so an invalid/missing token never reaches
+    # WebSocketManager at all — verified live that calling close() before
+    # accept() makes uvicorn refuse the handshake with a plain HTTP 403,
+    # not a WS close frame carrying this code; the `code=`/`reason=`
+    # arguments are accepted but effectively unused on this path (there's
+    # no accepted WS connection yet for a close frame to be sent over).
+    auth_service: AuthService = websocket.app.state.auth_service
+    token = websocket.query_params.get("token")
+    username = auth_service.verify_token(token) if token else None
+    if username is None:
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+
+    manager: WebSocketManager = websocket.app.state.ws_manager
     await manager.connect(websocket)
     try:
         while True:

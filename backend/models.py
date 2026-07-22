@@ -117,3 +117,13 @@ class AnalyticsResponse(BaseModel):
     history: list[PortfolioSnapshot]
     best_performer_7d: PerformanceEntry | None
     worst_performer_7d: PerformanceEntry | None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
