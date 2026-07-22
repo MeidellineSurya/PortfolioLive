@@ -1,9 +1,11 @@
 """Bridges Alpaca price ticks to connected frontend WebSocket clients.
 
 Owns the one-Alpaca-connection-for-everyone invariant: individual tickers
-are subscribed/unsubscribed on the shared ``AlpacaClient`` as holdings are
-added/removed, and every incoming quote is turned into a P&L-aware
-``PriceUpdate`` broadcast to all connected frontend clients.
+are subscribed/unsubscribed on the shared ``AlpacaClient`` as holdings or
+watchlist entries are added/removed, and every incoming quote is turned
+into either a P&L-aware ``PriceUpdate`` (portfolio holdings) or a
+``WatchlistPriceUpdate`` (watchlist-only tickers) broadcast to all
+connected frontend clients.
 """
 from __future__ import annotations
 
@@ -14,8 +16,9 @@ from fastapi import WebSocket
 
 import metrics
 from alpaca_client import AlpacaClient
-from models import Holding, HoldingWithPrice, PriceUpdate
+from models import Holding, HoldingWithPrice, PriceUpdate, WatchlistItemWithPrice, WatchlistPriceUpdate
 from portfolio_store import PortfolioStore
+from watchlist_store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +31,12 @@ QuoteListener = Callable[[str, float, float], Awaitable[None]]
 
 
 class WebSocketManager:
-    def __init__(self, alpaca_client: AlpacaClient, portfolio_store: PortfolioStore):
+    def __init__(
+        self, alpaca_client: AlpacaClient, portfolio_store: PortfolioStore, watchlist_store: WatchlistStore
+    ):
         self._alpaca = alpaca_client
         self._store = portfolio_store
+        self._watchlist = watchlist_store
         self._clients: set[WebSocket] = set()
         # Previous close is fetched once per ticker (not per tick) and kept
         # in memory for the life of the process — see decision log for why
@@ -81,6 +87,29 @@ class WebSocketManager:
             )
         return enriched
 
+    def enrich_watchlist(self, tickers: list[str]) -> list[WatchlistItemWithPrice]:
+        """GET /watchlist's equivalent of enrich_holdings — same "show the
+        last-known price on load instead of blank" reasoning, just with no
+        P&L fields to compute (a watchlist ticker has no quantity/avg_cost).
+        """
+        enriched = []
+        for ticker in tickers:
+            price = self._last_prices.get(ticker)
+            if price is None:
+                enriched.append(WatchlistItemWithPrice(ticker=ticker))
+                continue
+            prev_close = self._prev_close.get(ticker, price)
+            change, change_pct = self._change_math(prev_close, price)
+            enriched.append(
+                WatchlistItemWithPrice(
+                    ticker=ticker,
+                    price=round(price, 4),
+                    change=round(change, 4),
+                    change_pct=round(change_pct, 4),
+                )
+            )
+        return enriched
+
     @staticmethod
     def _position_math(holding: Holding, price: float) -> tuple[float, float, float]:
         cost_basis = holding.avg_cost * holding.quantity
@@ -88,6 +117,12 @@ class WebSocketManager:
         position_pnl = position_value - cost_basis
         position_pnl_pct = (position_pnl / cost_basis * 100) if cost_basis else 0.0
         return position_value, position_pnl, position_pnl_pct
+
+    @staticmethod
+    def _change_math(prev_close: float, price: float) -> tuple[float, float]:
+        change = price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
+        return change, change_pct
 
     # ---- frontend client management ------------------------------------
 
@@ -130,38 +165,55 @@ class WebSocketManager:
         for holding in holdings:
             await self.track_ticker(holding.ticker)
 
+    async def load_initial_watchlist(self) -> None:
+        tickers = await self._watchlist.get_all_tickers()
+        for ticker in tickers:
+            await self.track_ticker(ticker)
+
     # ---- Alpaca quote callback (registered as AlpacaClient's on_quote) --
 
     async def on_quote(self, ticker: str, price: float) -> None:
         holding = await self._store.get_holding(ticker)
-        if holding is None:
-            # Ticker was removed from the portfolio after subscribing but
-            # before the unsubscribe round trip completed; drop the tick.
+        # A ticker can be a portfolio holding, a watchlist entry, or
+        # (transiently) neither — removed from both after subscribing but
+        # before the unsubscribe round trip completed, in which case the
+        # tick is dropped. It's never checked as *both*: POST /portfolio/add
+        # and POST /watchlist/add each guard against the ticker already
+        # being in the other list, so this is a genuine either/or, not a
+        # simplification that ignores a real overlap case.
+        is_watched = holding is None and await self._watchlist.has_ticker(ticker)
+        if holding is None and not is_watched:
             return
 
         prev_close = self._prev_close.get(ticker, price)
-        change = price - prev_close
-        change_pct = (change / prev_close * 100) if prev_close else 0.0
+        change, change_pct = self._change_math(prev_close, price)
 
-        position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
-
-        update = PriceUpdate(
-            ticker=ticker,
-            price=round(price, 4),
-            change=round(change, 4),
-            change_pct=round(change_pct, 4),
-            position_value=round(position_value, 2),
-            position_pnl=round(position_pnl, 2),
-            position_pnl_pct=round(position_pnl_pct, 4),
-        )
-        await self.broadcast(update.model_dump())
+        if holding is not None:
+            position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
+            update = PriceUpdate(
+                ticker=ticker,
+                price=round(price, 4),
+                change=round(change, 4),
+                change_pct=round(change_pct, 4),
+                position_value=round(position_value, 2),
+                position_pnl=round(position_pnl, 2),
+                position_pnl_pct=round(position_pnl_pct, 4),
+            )
+            await self.broadcast(update.model_dump())
+        else:
+            watch_update = WatchlistPriceUpdate(
+                ticker=ticker, price=round(price, 4), change=round(change, 4), change_pct=round(change_pct, 4)
+            )
+            await self.broadcast(watch_update.model_dump())
 
         previous_price = self._last_prices.get(ticker)
         self._last_prices[ticker] = price
         # No previous price means this is the first tick this process has
         # ever seen for the ticker — nothing to compare against yet, so
         # there's no "crossing" to detect (see AlertService, which is the
-        # only current listener and needs exactly this guarantee).
+        # only current listener and needs exactly this guarantee). This
+        # applies identically to watchlist tickers now — an alert can be
+        # set on either kind (main.py's create_alert checks both stores).
         if previous_price is not None:
             for listener in self._quote_listeners:
                 try:

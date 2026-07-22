@@ -36,9 +36,13 @@ from models import (
     NewsItem,
     PriceAlert,
     PriceAlertCreate,
+    WatchlistAdd,
+    WatchlistItem,
+    WatchlistItemWithPrice,
 )
 from news_service import NewsService
 from portfolio_store import PortfolioStore
+from watchlist_store import WatchlistStore
 from websocket_manager import WebSocketManager
 
 load_dotenv()
@@ -56,6 +60,7 @@ logging.basicConfig(
 )
 
 MAX_HOLDINGS = 50
+MAX_WATCHLIST = 50
 
 _bearer_scheme = HTTPBearer()
 
@@ -87,10 +92,12 @@ async def lifespan(app: FastAPI):
         secret_key=os.environ["ALPACA_SECRET_KEY"],
         on_quote=on_quote,
     )
-    manager = WebSocketManager(alpaca_client, store)
+    watchlist_store = WatchlistStore(os.environ["REDIS_URL"])
+    manager = WebSocketManager(alpaca_client, store, watchlist_store)
     news_service = NewsService(
         alpaca_client=alpaca_client,
         portfolio_store=store,
+        watchlist_store=watchlist_store,
         ws_manager=manager,
         groq_api_key=os.environ["GROQ_API_KEY"],
         redis_url=os.environ["REDIS_URL"],
@@ -107,6 +114,7 @@ async def lifespan(app: FastAPI):
     manager.add_quote_listener(alert_service.check_and_trigger)
 
     app.state.store = store
+    app.state.watchlist_store = watchlist_store
     app.state.alpaca_client = alpaca_client
     app.state.ws_manager = manager
     app.state.news_service = news_service
@@ -118,6 +126,7 @@ async def lifespan(app: FastAPI):
     try:
         await auth_service.bootstrap_user(os.environ["AUTH_USERNAME"], os.environ["AUTH_PASSWORD"])
         await manager.load_initial_holdings()
+        await manager.load_initial_watchlist()
         news_service.start()
         analytics_service.start()
         yield
@@ -129,6 +138,7 @@ async def lifespan(app: FastAPI):
         # timeout eventually notices the client is gone.
         await alpaca_client.stop()
         await store.close()
+        await watchlist_store.close()
         await alert_store.close()
         await auth_service.close()
 
@@ -191,6 +201,12 @@ async def add_holding(holding: Holding) -> Holding:
 
     await store.add_holding(holding)
     await app.state.ws_manager.track_ticker(holding.ticker)
+    # Buying something you were watching means you're no longer just
+    # watching it — auto-migrate out of the watchlist so it doesn't show
+    # up in both places. The underlying Alpaca subscription is untouched
+    # (track_ticker above already ensured it exists); this only removes
+    # the watchlist's own membership record.
+    await app.state.watchlist_store.remove_ticker(holding.ticker)
     return holding
 
 
@@ -205,6 +221,45 @@ async def remove_holding(ticker: str) -> None:
         raise HTTPException(status_code=404, detail=f"no holding for {ticker}")
 
     await store.remove_holding(ticker)
+    await app.state.ws_manager.untrack_ticker(ticker)
+    await app.state.alert_service.delete_alerts_for_ticker(ticker)
+
+
+@protected.get("/watchlist", response_model_exclude_none=True)
+async def get_watchlist() -> list[WatchlistItemWithPrice]:
+    tickers = await app.state.watchlist_store.get_all_tickers()
+    return app.state.ws_manager.enrich_watchlist(tickers)
+
+
+@protected.post("/watchlist/add", status_code=201)
+async def add_to_watchlist(item: WatchlistAdd) -> WatchlistItem:
+    store: PortfolioStore = app.state.store
+    watchlist_store: WatchlistStore = app.state.watchlist_store
+
+    # Watching something you already own is confusing (it'd show up in
+    # both the holdings table and the watchlist with no clear reason why)
+    # and pointless (the portfolio table already has its live price).
+    if await store.get_holding(item.ticker) is not None:
+        raise HTTPException(status_code=400, detail=f"{item.ticker} is already in your portfolio")
+    if await watchlist_store.count_tickers() >= MAX_WATCHLIST:
+        raise HTTPException(status_code=429, detail=f"watchlist limit of {MAX_WATCHLIST} tickers reached")
+
+    await watchlist_store.add_ticker(item.ticker)
+    await app.state.ws_manager.track_ticker(item.ticker)
+    return WatchlistItem(ticker=item.ticker)
+
+
+@protected.delete("/watchlist/{ticker}", status_code=204, response_model=None)
+async def remove_from_watchlist(ticker: str) -> None:
+    ticker = ticker.strip().upper()
+    if not TICKER_RE.match(ticker):
+        raise HTTPException(status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z)")
+
+    watchlist_store: WatchlistStore = app.state.watchlist_store
+    if not await watchlist_store.has_ticker(ticker):
+        raise HTTPException(status_code=404, detail=f"{ticker} is not on your watchlist")
+
+    await watchlist_store.remove_ticker(ticker)
     await app.state.ws_manager.untrack_ticker(ticker)
     await app.state.alert_service.delete_alerts_for_ticker(ticker)
 
@@ -235,16 +290,18 @@ async def list_alerts() -> list[PriceAlert]:
 async def create_alert(alert: PriceAlertCreate) -> PriceAlert:
     # Alerts only ever get checked from inside WebSocketManager.on_quote
     # (via the quote-listener hook), which only fires for tickers actually
-    # subscribed on Alpaca — and that subscription is driven entirely by
-    # portfolio holdings (track_ticker/untrack_ticker). An alert for a
-    # ticker you don't hold would never receive a tick to compare against
-    # and would just sit forever, silently dead. Supporting watchlist-style
-    # alerts (not-yet-owned tickers) would mean giving alerts their own
-    # subscription lifecycle, independent of holdings — a bigger change
-    # than this feature asked for.
+    # subscribed on Alpaca — driven by *either* portfolio holdings or
+    # watchlist entries (websocket_manager.py's track_ticker doesn't care
+    # which). This used to require the ticker be a holding specifically
+    # (commit 15), noted then as "watchlist-style alerts would need their
+    # own subscription lifecycle" — the watchlist feature now provides
+    # exactly that, so the restriction is checked against both stores.
     store: PortfolioStore = app.state.store
-    if await store.get_holding(alert.ticker) is None:
-        raise HTTPException(status_code=400, detail=f"{alert.ticker} is not in your portfolio")
+    watchlist_store: WatchlistStore = app.state.watchlist_store
+    is_held = await store.get_holding(alert.ticker) is not None
+    is_watched = await watchlist_store.has_ticker(alert.ticker)
+    if not is_held and not is_watched:
+        raise HTTPException(status_code=400, detail=f"{alert.ticker} is not in your portfolio or watchlist")
 
     alert_service: AlertService = app.state.alert_service
     return await alert_service.create_alert(alert.ticker, alert.target_price)

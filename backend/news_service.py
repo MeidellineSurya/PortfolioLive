@@ -1,8 +1,9 @@
 """News fetching + Groq summarisation.
 
 Consumes the raw news batches ``AlpacaClient`` polls every 60s, groups them
-per portfolio ticker (latest 5), summarises each with Groq, and broadcasts
-the result to connected frontend clients via ``WebSocketManager``.
+per tracked ticker — portfolio holdings and watchlist entries alike
+(latest 5 each), summarises each with Groq, and broadcasts the result to
+connected frontend clients via ``WebSocketManager``.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import metrics
 from alpaca_client import AlpacaClient, NewsArticle
 from models import NewsItem
 from portfolio_store import PortfolioStore
+from watchlist_store import WatchlistStore
 from websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
@@ -40,12 +42,14 @@ class NewsService:
         self,
         alpaca_client: AlpacaClient,
         portfolio_store: PortfolioStore,
+        watchlist_store: WatchlistStore,
         ws_manager: WebSocketManager,
         groq_api_key: str,
         redis_url: str,
     ):
         self._alpaca = alpaca_client
         self._store = portfolio_store
+        self._watchlist = watchlist_store
         self._ws_manager = ws_manager
         self._groq = AsyncGroq(api_key=groq_api_key)
         # A dedicated connection, separate from PortfolioStore's — this
@@ -65,18 +69,19 @@ class NewsService:
         self._broadcast_ids: set[int] = set()
 
     def start(self) -> None:
-        self._alpaca.start_news_polling(get_tickers=self._get_portfolio_tickers, on_batch=self._handle_batch)
+        self._alpaca.start_news_polling(get_tickers=self._get_tracked_tickers, on_batch=self._handle_batch)
 
-    async def _get_portfolio_tickers(self) -> list[str]:
+    async def _get_tracked_tickers(self) -> list[str]:
         holdings = await self._store.get_all_holdings()
-        return [h.ticker for h in holdings]
+        watchlist = await self._watchlist.get_all_tickers()
+        return list({h.ticker for h in holdings} | set(watchlist))
 
     async def _handle_batch(self, articles: list[NewsArticle]) -> None:
-        portfolio_tickers = set(await self._get_portfolio_tickers())
+        tracked_tickers = set(await self._get_tracked_tickers())
         by_ticker: dict[str, list[NewsArticle]] = defaultdict(list)
         for article in articles:
             for symbol in article.symbols:
-                if symbol in portfolio_tickers:
+                if symbol in tracked_tickers:
                     by_ticker[symbol].append(article)
 
         for ticker, ticker_articles in by_ticker.items():

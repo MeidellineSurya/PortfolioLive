@@ -1534,3 +1534,90 @@ last real price from earlier in the day (or an earlier session).
   shape, 401 handling, `?token=` on the WS URL) was verified directly
   against the real backend in commit 20, and the frontend code
   implementing it type-checks and builds against that same contract.
+
+---
+
+## Commit 22 — Watchlist mode (backend)
+
+**Files:** `backend/watchlist_store.py`, `backend/websocket_manager.py`, `backend/news_service.py`, `backend/main.py`, `backend/models.py`
+
+User-pitched feature: tickers tracked for price/news without being owned.
+The "architecturally trivial — a second Redis set" framing undersold one
+part of it: `WebSocketManager.on_quote` had a hard assumption baked into
+its very first line (`if holding is None: return`) that every tick
+belongs to a portfolio position. Making a tick for an unowned, watched
+ticker actually *reach* a client required changing that dispatch, not
+just adding storage for the tickers themselves.
+
+- **`WatchlistPriceUpdate` is a new WS message type, not `PriceUpdate`
+  with optional `position_*` fields.** Every existing consumer of
+  `price_update` — the frontend's portfolio reducer, `PortfolioTable` —
+  already assumes a real position (quantity, avg_cost, P&L) sits behind
+  every message of that type. Overloading the type to sometimes carry
+  P&L and sometimes not would push a "which kind is this" check onto
+  every current and future consumer; a distinct `type` answers that
+  question once, at the point a message is dispatched, matching the same
+  reasoning already used for `PriceAlertTriggered`.
+
+- **`on_quote` now branches on holding-vs-watchlist, but a ticker is never
+  treated as both.** `POST /portfolio/add` auto-removes the ticker from
+  the watchlist if present; `POST /watchlist/add` rejects a ticker
+  that's already a holding (`400`). This isn't just tidiness — `on_quote`
+  checks `holding is None and await self._watchlist.has_ticker(ticker)`
+  to decide which message type to send, and if a ticker could
+  legitimately be in both stores at once, that check would need a
+  documented precedence rule instead of being a clean either/or.
+
+- **Buying a watchlisted ticker migrates it out of the watchlist, but
+  removing a *holding* does not auto-add it back to the watchlist.** The
+  first direction is unambiguous: you're not "just watching" something
+  you now own, and leaving it in both places would show it twice with no
+  clear reason why. The second direction has no equally obvious answer
+  (does selling mean you want to keep watching it, or are you done with
+  it entirely?) — left as a manual re-add rather than guessing the
+  answer to a question the feature request didn't address.
+
+- **This closes a gap explicitly logged as out-of-scope in commit 15**:
+  `POST /alerts` used to require the ticker be a portfolio holding,
+  specifically because an alert on an unwatched ticker would never
+  receive a tick to check against — "supporting watchlist-style alerts...
+  would mean giving alerts their own subscription lifecycle... a bigger
+  change than this feature asked for." Watchlist mode *is* that bigger
+  change, now that it exists — updated `create_alert`'s validation to
+  accept either a holding or a watched ticker, since both are genuinely
+  subscribed on Alpaca and both will actually receive ticks to compare
+  against. Not new scope smuggled in — a documented deferred decision
+  revisited now that its stated precondition is met.
+
+- **A third model (`WatchlistAdd`) needing the exact same ticker-format
+  validation as `Holding` and `PriceAlertCreate` was the point where
+  copy-pasting the validator body a third time stopped being the
+  simpler option** — extracted into a shared `_validate_ticker` function
+  that all three `@field_validator`s call, while keeping each model's own
+  validator decorator (still no shared base class: the three models
+  validate the same field for three unrelated reasons — own it, watch a
+  price on it, watch it without owning it — and forcing them into a
+  common parent to save four lines each isn't a good trade).
+
+- **`NewsService._get_portfolio_tickers` was renamed
+  `_get_tracked_tickers`** and now unions portfolio holdings with
+  watchlist tickers, rather than adding a second, parallel polling path
+  for watchlist news. One 60s poll cycle, one combined ticker set — Alpaca's
+  news endpoint doesn't care why a ticker is being asked about.
+
+- **Live verification, following the same real-code-real-Redis pattern as
+  every stateful feature this session:** confirmed `POST /watchlist/add`
+  rejects an already-held ticker (`400`) and succeeds for a new one;
+  simulated ticks for a portfolio holding, a watchlist ticker, and an
+  untracked ticker through the real `on_quote` in one script — confirmed
+  exactly two broadcasts (not three), with the holding producing
+  `price_update` and the watchlist ticker producing
+  `watchlist_price_update`, each with the right fields present/absent.
+  Confirmed live: an alert created on a watchlist-only ticker now
+  succeeds (previously would `400`); buying a watchlisted ticker
+  correctly empties the watchlist while the alert on it survives
+  untouched; removing a watchlist ticker cascades to delete its alerts,
+  mirroring `remove_holding`'s existing behavior. Confirmed
+  `NewsService._get_tracked_tickers` returns the union of both stores
+  against real Redis data. Checked the container's logs after all of the
+  above — no errors.
