@@ -1672,3 +1672,81 @@ just adding storage for the tickers themselves.
   `handleRemoveFromWatchlist` produce succeed end-to-end. As with every
   frontend commit this session, did not visually confirm the rendered
   watchlist table/sparklines in an actual browser.
+
+---
+
+## Commit 24 — Fix: unauthenticated first load crashed the whole app
+
+**Files:** `frontend/lib/auth.ts`, `frontend/app/page.tsx`, `frontend/app/analytics/page.tsx`
+
+Found by the user, live, on a real browser: "Application error: a
+client-side exception has occurred." Every prior frontend commit this
+session had noted the same caveat — no headless browser available to
+visually verify — and this is exactly the class of bug that gap let
+through: something that only breaks in a real browser processing a real
+response, not something `tsc`/`eslint`/a production build would ever
+catch.
+
+- **Root cause, confirmed with an actual browser console capture (see
+  below), not inferred:** FastAPI's `HTTPBearer()` (backend/main.py,
+  commit 20) returns `403` when the `Authorization` header is *missing
+  entirely*, and only this app's own `401` when a token is present but
+  invalid/expired — a distinction already written down in commit 20's
+  decision log but never actually wired into `authFetch`, which only
+  reacted to `401`. A brand-new browser with no token yet hits exactly
+  the 403 case on its very first request. `authFetch` returned that 403
+  response unchanged; the calling code in `page.tsx` unconditionally
+  called `res.json()` on it and dispatched the result — an error body
+  shaped like `{"detail": "Not authenticated"}` — as if it were the
+  holdings array. `portfolioReducer`'s `for (const holding of
+  action.holdings)` then threw `TypeError: action.holdings is not
+  iterable`, an uncaught exception in a render path, which is what
+  React/Next.js surfaces as "Application error."
+
+- **Two fixes, not one, because either alone is incomplete:**
+  1. `authFetch` now treats `403` the same as `401` (clear the token,
+     redirect to `/login`) — the actual auth-state-repair action.
+  2. Every initial data-fetch effect (`GET /portfolio`, `/watchlist`,
+     `/alerts` in `page.tsx`; `/analytics` in `analytics/page.tsx`) now
+     checks `res.ok` before calling `.json()`, throwing into `.catch()`
+     otherwise. This one is the actual crash fix: `window.location.href =
+     "/login"` does not halt JavaScript execution — the `.then()` chain
+     already in flight keeps running for a moment while the navigation
+     is still pending, so fix #1 alone does not reliably stop the bad
+     body from still being parsed and dispatched before the redirect
+     takes effect. Fix #2 makes that race irrelevant, and also makes
+     every one of these fetches robust against *any* non-OK status (a
+     500, a network-layer hiccup returning an HTML error page, not just
+     401/403 specifically) — not a narrower fix aimed only at
+     reproducing today's exact failure.
+
+- **Verification used a real headless browser for the first time this
+  session — Playwright + Chromium, installed specifically to chase this
+  bug down** rather than continuing to reason about frontend code from
+  static analysis alone. This is a capability gap worth naming plainly:
+  every prior frontend commit's decision log entry says some version of
+  "did not visually confirm in an actual browser" — that caveat was
+  covering exactly this class of bug, and one finally reached the user
+  because of it. Concretely, with a real browser:
+  - Reproduced the crash first, with the exact console output pinned in
+    this log entry's root-cause description above — a real
+    `[pageerror]` event with the real stack trace, not a guess.
+  - Confirmed the fix: reloading with no token now redirects cleanly to
+    `/login` with zero page errors (only the expected, harmless 403s in
+    the network log on the way there).
+  - Drove an actual login (filled the real form, clicked submit) and
+    confirmed the dashboard renders correctly post-auth: Holdings,
+    Watchlist, and Total Value/P&L all present, zero console errors.
+  - Interacted with the running app for the first time this session —
+    submitted the "watch a ticker" form for TSLA and confirmed it
+    actually appeared in the watchlist table.
+  - Screenshotted the dashboard and the analytics page and visually
+    confirmed both render correctly (analytics still showing the
+    synthetic snapshots seeded during commit 17's verification — real
+    data, real chart, real per-holding breakdown, all rendering as
+    designed).
+  This changes what "verified" should mean for frontend work going
+  forward in this project: a headless browser is available and now
+  known to work in this environment, so future frontend commits should
+  use it rather than defaulting to the network-contract-only
+  verification this session relied on before today.

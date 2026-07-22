@@ -139,7 +139,17 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     authFetch(`${API_URL}/portfolio`)
-      .then((res) => res.json())
+      .then((res) => {
+        // A non-OK response (e.g. 401/403 before authFetch's redirect
+        // takes effect — window.location.href doesn't halt JS execution,
+        // so this chain keeps running for a moment) must not be parsed
+        // as if it were the holdings array: the error body is a JSON
+        // object like {"detail": "..."}, and dispatching that as
+        // `holdings` crashes portfolioReducer's `for...of` with "not
+        // iterable". Throwing here routes it to .catch() instead.
+        if (!res.ok) throw new Error(`GET /portfolio failed: ${res.status}`);
+        return res.json();
+      })
       .then((holdings: HoldingWithPrice[]) => {
         if (!cancelled) dispatch({ type: "SET_HOLDINGS", holdings });
       })
@@ -155,7 +165,10 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     authFetch(`${API_URL}/watchlist`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`GET /watchlist failed: ${res.status}`);
+        return res.json();
+      })
       .then((items: WatchlistItem[]) => {
         if (!cancelled) watchlistDispatch({ type: "SET_WATCHLIST", items });
       })
@@ -171,7 +184,10 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     authFetch(`${API_URL}/alerts`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`GET /alerts failed: ${res.status}`);
+        return res.json();
+      })
       .then((data: PriceAlert[]) => {
         if (!cancelled) setAlerts(data);
       })

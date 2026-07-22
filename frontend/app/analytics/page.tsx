@@ -44,7 +44,14 @@ export default function AnalyticsPage() {
   useEffect(() => {
     let cancelled = false;
     authFetch(`${API_URL}/analytics?days=${HISTORY_DAYS}`)
-      .then((res) => res.json())
+      .then((res) => {
+        // Same reasoning as page.tsx's data-fetch effects: a non-OK
+        // response's body is an error object, not an AnalyticsResponse —
+        // parsing it as one would set `data` to something that doesn't
+        // match the shape every render below assumes.
+        if (!res.ok) throw new Error(`GET /analytics failed: ${res.status}`);
+        return res.json();
+      })
       .then((result: AnalyticsResponse) => {
         if (!cancelled) setData(result);
       })

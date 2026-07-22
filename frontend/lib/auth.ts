@@ -18,9 +18,17 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-// Wraps fetch with the Authorization header and a single shared 401
-// reaction (drop the stale/expired token, send the user back to login)
-// so every call site doesn't need its own copy of that logic.
+// Wraps fetch with the Authorization header and a single shared
+// not-authenticated reaction (drop any token, send the user back to
+// login) so every call site doesn't need its own copy of that logic.
+//
+// Both 401 *and* 403 are treated as "not authenticated," not just 401:
+// the backend's HTTPBearer() dependency (backend/main.py) returns 403
+// specifically when the Authorization header is missing entirely, and
+// only returns this app's own 401 for a token that's present but invalid
+// or expired (documented in DECISION_LOG.md, commit 20 — noted there but
+// not, originally, acted on here). A brand-new browser with no token yet
+// hits exactly the 403 case on its very first request.
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const token = getToken();
   const res = await fetch(url, {
@@ -30,7 +38,7 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   });
-  if (res.status === 401 && typeof window !== "undefined") {
+  if ((res.status === 401 || res.status === 403) && typeof window !== "undefined") {
     clearToken();
     window.location.href = "/login";
   }
