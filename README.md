@@ -1,7 +1,8 @@
 # PortfolioLive
 
-A real-time portfolio dashboard: live stock prices, live P&L, and
-AI-summarised news, filtered to whatever you hold.
+A real-time portfolio dashboard: live stock prices, live P&L, AI-summarised
+news, price alerts, a watchlist, and performance analytics — behind a
+single-user login, all on top of one shared WebSocket connection.
 
 ## Architecture
 
@@ -78,6 +79,10 @@ why the Docker `CMD` needs `exec`, and so on — is in
   news cache hit/miss, summaries generated
 - Single-user JWT login protecting every route except `/health`/`/metrics`
 - Auto-reconnecting WebSocket client (exponential backoff, capped at 30s)
+- Broadcasts are throttled to at most once per ticker per second — quote
+  ticks can arrive several times a second, and alerts still see every raw
+  tick (so a brief threshold crossing is never missed), but the UI only
+  needs a steady cadence, not every microstructure flicker
 
 ## Tech stack
 
@@ -93,28 +98,39 @@ why the Docker `CMD` needs `exec`, and so on — is in
 
 ```
 backend/
-  main.py               FastAPI app, routes, WS endpoint, lifespan wiring
-  alpaca_client.py       Alpaca WebSocket price stream + REST news polling
-  websocket_manager.py   Fans price ticks out to connected frontend clients
-  news_service.py        Groq summarisation, caching, dedup, broadcast
-  portfolio_store.py     Redis-backed holdings CRUD
-  models.py              Pydantic models shared across the backend
-  tests/                 pytest — model validation
+  main.py                 FastAPI app, routes, WS endpoint, lifespan wiring
+  alpaca_client.py        Alpaca WebSocket price stream + REST news polling
+  websocket_manager.py    Fans price ticks out to connected frontend clients
+  news_service.py         Groq summarisation, caching, dedup, broadcast
+  portfolio_store.py      Redis-backed holdings CRUD
+  watchlist_store.py      Redis-backed watched-ticker CRUD
+  alert_store.py          Redis-backed price alert CRUD
+  alert_service.py        Threshold-crossing detection on live ticks
+  analytics_service.py    Hourly portfolio snapshots + P&L history/analytics
+  auth.py                 Single-user JWT auth (bootstrap, login, verify)
+  metrics.py              Prometheus counters/gauges (shared registry)
+  models.py               Pydantic models shared across the backend
+  tests/                  pytest — models, auth, alerts, WebSocket fan-out
   Dockerfile, railway.toml, .dockerignore
 frontend/
   app/
     page.tsx              Dashboard: state, WebSocket wiring, layout
+    login/page.tsx        Login form
+    analytics/page.tsx    Portfolio analytics charts
     components/
-      PortfolioTable.tsx   Holdings table with live P&L + sparklines
-      PriceSparkline.tsx   Mini Recharts line chart per holding
-      NewsFeed.tsx         AI news feed with ticker tabs + load more
-      AddTickerForm.tsx    Add-holding form (optimistic UI)
+      PortfolioTable.tsx  Holdings table with live P&L + sparklines
+      Watchlist.tsx       Watchlist table with live price + change
+      PriceSparkline.tsx  Mini Recharts line chart per holding
+      NewsFeed.tsx        AI news feed with ticker tabs + load more
+      AddTickerForm.tsx   Add-holding form (optimistic UI)
+      Toast.tsx           Alert-triggered toast notifications
   lib/
-    websocket.ts           useWebSocket hook (auto-reconnect)
-    types.ts                Shared TypeScript types (mirrors backend/models.py)
-    format.ts               Currency / percent / relative-time formatting
-.github/workflows/ci.yml   Lint + test on every PR (backend + frontend)
-DECISION_LOG.md            Every non-obvious decision, organised per commit
+    websocket.ts  useWebSocket hook (auto-reconnect)
+    auth.ts       authFetch wrapper + useRequireAuth login gate
+    types.ts      Shared TypeScript types (mirrors backend/models.py)
+    format.ts     Currency / percent / relative-time formatting
+.github/workflows/ci.yml  Lint + test on every PR (backend + frontend)
+DECISION_LOG.md           Every non-obvious decision, organised per commit
 ```
 
 ## Getting started

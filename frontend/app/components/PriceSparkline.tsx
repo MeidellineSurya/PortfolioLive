@@ -23,11 +23,27 @@ export default function PriceSparkline({ prices }: PriceSparklineProps) {
   const color = isUp ? POSITIVE_COLOR : NEGATIVE_COLOR;
   const data = prices.map((price, index) => ({ index, price }));
 
+  // A plain dataMin/dataMax domain always stretches to exactly fit
+  // whatever range is in the current window, so a few cents of ordinary
+  // bid/ask noise on e.g. a $300 stock fills this 32px-tall chart just as
+  // dramatically as a genuine multi-percent move would — that's most of
+  // what reads as "jumping a lot" even after the backend picks a
+  // deterministic midpoint price per tick. Flooring the domain at a
+  // fixed 0.1% of the latest price gives sub-noise-level fluctuations a
+  // stable, non-dramatic baseline, while any real move bigger than that
+  // still scales the chart normally.
+  const latest = prices[prices.length - 1];
+  const rawMin = Math.min(...prices);
+  const rawMax = Math.max(...prices);
+  const minRange = latest * 0.001;
+  const pad = Math.max(0, (minRange - (rawMax - rawMin)) / 2);
+  const domain: [number, number] = [rawMin - pad, rawMax + pad];
+
   return (
     <div className="h-8 w-24">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data}>
-          <YAxis domain={["dataMin", "dataMax"]} hide />
+          <YAxis domain={domain} hide />
           <Line
             type="monotone"
             dataKey="price"

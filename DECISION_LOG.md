@@ -1750,3 +1750,94 @@ catch.
   known to work in this environment, so future frontend commits should
   use it rather than defaulting to the network-contract-only
   verification this session relied on before today.
+
+## Commit 25 — Fix: sparkline/trend charts jumping sporadically
+
+**Files:** `backend/alpaca_client.py`, `backend/websocket_manager.py`,
+`backend/tests/test_websocket_manager.py`,
+`frontend/app/components/PriceSparkline.tsx`
+
+Reported by the user: "trend graphs move sporadically, jumping values a
+lot per second." Three independent, compounding contributors, found by
+reading the actual tick pipeline end to end and verifying each piece
+against real Alpaca data rather than guessing at a single cause:
+
+- **Non-deterministic side-of-spread selection
+  (`alpaca_client.py`).** `_handle_quote` computed `price =
+  quote.ask_price or quote.bid_price` — whichever happened to be
+  non-zero on a given tick, with no consistent rule. Two consecutive
+  ticks could land on opposite sides of a real, verified spread (IEX
+  quoting AAPL at bid $324.10 / ask $324.14 during live market hours,
+  confirmed via a direct REST call to `/v2/stocks/AAPL/quotes/latest`)
+  with no actual price movement between them — reading as the price
+  flip-flopping every tick. Changed to the midpoint of bid/ask when both
+  are present, falling back to whichever single side exists otherwise
+  (dropping a one-sided/thin quote entirely would discard real, if
+  partial, information).
+
+- **No throttling anywhere in the broadcast pipeline
+  (`websocket_manager.py`).** Reading `on_quote` end to end: every
+  single incoming Alpaca quote — which for an actively-traded symbol on
+  IEX can update several times a second — was broadcast to clients
+  immediately and unconditionally. The frontend's rolling 20-point
+  sparkline history (`page.tsx`, `MAX_PRICE_HISTORY`) was therefore
+  filled from only a few seconds of real time, so it plotted every raw
+  quote flicker rather than anything resembling a trend. This, not
+  primarily the bid/ask-side bug above, is the main reason the fix above
+  alone did not resolve the report on its own — confirmed live: capturing
+  20 seconds of real post-midpoint-fix ticks for AAPL/NVDA/GOOG during
+  open market hours still showed rapid back-and-forth movement between
+  nearby price levels, because IEX's own top-of-book genuinely does
+  flicker at that frequency (single-venue quote microstructure, not a
+  bug in either Alpaca's data or this app's prior logic).
+
+  Fixed by capping *broadcasts* to at most once per ticker per
+  `BROADCAST_THROTTLE_SECONDS` (1s), tracked in a new
+  `_last_broadcast_at` dict. Deliberately gates only the broadcast, not
+  the rest of `on_quote`: `_last_prices` and the quote-listener loop
+  (`AlertService`'s threshold-crossing detection) still run on every raw
+  tick, unthrottled — a price alert must not miss a brief crossing that
+  happens to fall inside a throttle window just because the UI wasn't
+  told about it. Uses `_last_broadcast_at.get(ticker)` returning `None`
+  as the "never broadcast" sentinel rather than defaulting to `0.0`:
+  `0.0` would work in production (`time.monotonic()` is always some
+  large offset from an arbitrary epoch, never near zero), but is a
+  fragile sentinel that only failed in a test with mocked time starting
+  at `0.0` — worth fixing properly rather than working around in the
+  test.
+
+- **Sparkline Y-axis auto-scaling amplifies whatever noise remains
+  (`PriceSparkline.tsx`).** `domain={["dataMin", "dataMax"]}` always
+  stretches to exactly fit the current window's range, so a few cents of
+  ordinary bid/ask noise on a $300+ stock filled the entire 32px-tall
+  chart just as dramatically as a genuine multi-percent move would. Now
+  computes an explicit `[min, max]` domain, padded outward to a floor of
+  0.1% of the latest price when the raw range is smaller than that —
+  genuine moves larger than 0.1% pass through with negligible padding
+  and still scale normally.
+
+**Verification:**
+- `ruff check` and `pytest` (backend) clean throughout; 3 new tests in
+  `tests/test_websocket_manager.py` (no test file existed for
+  `WebSocketManager` before this commit) covering: rapid ticks within
+  one throttle window broadcast exactly once but still update
+  `last_prices` to the latest value; a tick after the window elapses
+  broadcasts again; every raw tick still reaches quote listeners
+  regardless of throttling. 20 passed total.
+- The bid/ask-midpoint fix was verified live during actual open market
+  hours (confirmed via Alpaca's `/v2/clock`): rebuilt the Docker image,
+  ran it with real credentials, and captured real `price_update`
+  messages over a raw authenticated WebSocket connection for
+  AAPL/NVDA/GOOG.
+- The broadcast-throttle and sparkline-domain fixes were **not**
+  re-verified against live ticks: the market closed between that
+  capture and finishing this fix (confirmed via `/v2/clock` again,
+  `is_open: false`, reopening 2026-07-23 09:30 ET). Verified instead by
+  `tsc --noEmit` and `eslint` (both clean), a domain-math check against
+  synthetic noisy/trending price sequences run directly in Node, a
+  rebuilt Docker image confirmed healthy and accepting real authenticated
+  WebSocket connections, and a Playwright pass (login flow, dashboard
+  render, zero console/page errors) confirming no regression — but not a
+  visual confirmation of smoother sparklines under real flickering
+  quotes, since none were available. Worth a live look once the market
+  reopens.

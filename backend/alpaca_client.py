@@ -129,7 +129,20 @@ class AlpacaClient:
             await asyncio.to_thread(stream.unsubscribe_quotes, ticker)
 
     async def _handle_quote(self, quote: Quote) -> None:
-        price = quote.ask_price or quote.bid_price
+        # The midpoint of bid/ask, not "ask, falling back to bid" — the
+        # previous version picked whichever side happened to be non-zero
+        # on a given tick, with no consistent rule. Two consecutive ticks
+        # could land on opposite sides of the spread (e.g. IEX quoting
+        # AAPL at bid $324.10 / ask $324.14 — a real, verified spread, not
+        # a hypothetical one) with no real price movement between them,
+        # which reads as the price sporadically jumping every tick. The
+        # midpoint is deterministic per tick and doesn't have that
+        # flip-flop artifact. Only fall back to a single side when the
+        # other is genuinely absent (a one-sided/thin quote) — dropping
+        # the tick entirely in that case would discard real, if partial,
+        # information.
+        ask, bid = quote.ask_price, quote.bid_price
+        price = (ask + bid) / 2 if (ask and bid) else (ask or bid)
         if not price:
             return
         # Runs on the stream thread's loop; hand off to the main loop

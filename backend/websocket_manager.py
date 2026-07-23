@@ -10,6 +10,7 @@ connected frontend clients.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 from fastapi import WebSocket
@@ -21,6 +22,19 @@ from portfolio_store import PortfolioStore
 from watchlist_store import WatchlistStore
 
 logger = logging.getLogger(__name__)
+
+# Alpaca's IEX quote stream can update a single symbol several times a
+# second (real bid/ask movement, not a bug — verified live against the
+# raw feed). Broadcasting every one of those to clients made sparkline
+# charts look like they were "jumping a lot per second": each tick pushed
+# a new point into the frontend's 20-point rolling window, so the visible
+# window spanned only a few seconds of real time and any ordinary quote
+# noise dominated it. Capping broadcasts to once per ticker per interval
+# spreads that same 20-point window over a much longer, more meaningful
+# span. This only gates *broadcasting* — see on_quote below, last_prices
+# and quote listeners (price alerts) still see every raw tick, so a brief
+# threshold crossing between broadcasts is never missed.
+BROADCAST_THROTTLE_SECONDS = 1.0
 
 # Called with (ticker, previous_price, new_price) after every quote that
 # has a previous price to compare against. Lets other services (price
@@ -51,6 +65,7 @@ class WebSocketManager:
         # handler).
         self._last_prices: dict[str, float] = {}
         self._quote_listeners: list[QuoteListener] = []
+        self._last_broadcast_at: dict[str, float] = {}
 
     def add_quote_listener(self, listener: QuoteListener) -> None:
         self._quote_listeners.append(listener)
@@ -188,23 +203,30 @@ class WebSocketManager:
         prev_close = self._prev_close.get(ticker, price)
         change, change_pct = self._change_math(prev_close, price)
 
-        if holding is not None:
-            position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
-            update = PriceUpdate(
-                ticker=ticker,
-                price=round(price, 4),
-                change=round(change, 4),
-                change_pct=round(change_pct, 4),
-                position_value=round(position_value, 2),
-                position_pnl=round(position_pnl, 2),
-                position_pnl_pct=round(position_pnl_pct, 4),
-            )
-            await self.broadcast(update.model_dump())
-        else:
-            watch_update = WatchlistPriceUpdate(
-                ticker=ticker, price=round(price, 4), change=round(change, 4), change_pct=round(change_pct, 4)
-            )
-            await self.broadcast(watch_update.model_dump())
+        now = time.monotonic()
+        last_broadcast = self._last_broadcast_at.get(ticker)
+        if last_broadcast is None or now - last_broadcast >= BROADCAST_THROTTLE_SECONDS:
+            self._last_broadcast_at[ticker] = now
+            if holding is not None:
+                position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
+                update = PriceUpdate(
+                    ticker=ticker,
+                    price=round(price, 4),
+                    change=round(change, 4),
+                    change_pct=round(change_pct, 4),
+                    position_value=round(position_value, 2),
+                    position_pnl=round(position_pnl, 2),
+                    position_pnl_pct=round(position_pnl_pct, 4),
+                )
+                await self.broadcast(update.model_dump())
+            else:
+                watch_update = WatchlistPriceUpdate(
+                    ticker=ticker,
+                    price=round(price, 4),
+                    change=round(change, 4),
+                    change_pct=round(change_pct, 4),
+                )
+                await self.broadcast(watch_update.model_dump())
 
         previous_price = self._last_prices.get(ticker)
         self._last_prices[ticker] = price
