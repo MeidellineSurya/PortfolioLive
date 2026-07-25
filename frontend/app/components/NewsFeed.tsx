@@ -81,11 +81,13 @@ export default function NewsFeed({ items, tickers }: NewsFeedProps) {
         ))}
       </div>
 
-      {visible.length === 0 ? (
+      {visible.length === 0 && (
         <p className="text-sm text-neutral-500 dark:text-neutral-400">
           No news yet — items appear here as they come in for your holdings.
         </p>
-      ) : (
+      )}
+
+      {visible.length > 0 && (
         <div className="max-h-[70vh] overflow-y-auto pr-1">
           <ul className="space-y-3">
             {visible.map((item) => (
@@ -113,20 +115,27 @@ export default function NewsFeed({ items, tickers }: NewsFeedProps) {
               </li>
             ))}
           </ul>
-
-          {selectedTicker && (
-            <button
-              type="button"
-              onClick={handleLoadMore}
-              disabled={loading}
-              className="mt-3 w-full rounded border border-neutral-300 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
-            >
-              {loading ? "Loading…" : "Load more"}
-            </button>
-          )}
-          {error && <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">{error}</p>}
         </div>
       )}
+
+      {/* Available whenever a specific ticker is selected, regardless of
+          whether anything's visible yet — "Load more" with no prior items
+          is exactly how a ticker with real news but no live broadcast yet
+          (e.g. one just added, or one that lost out on Alpaca's shared
+          50-article batch to a more news-active holding) becomes visible
+          without waiting on WebSocket timing. Previously nested inside
+          the visible.length>0 branch, which hid it in exactly that case. */}
+      {selectedTicker && (
+        <button
+          type="button"
+          onClick={handleLoadMore}
+          disabled={loading}
+          className="mt-3 w-full rounded border border-neutral-300 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+        >
+          {loading ? "Loading…" : "Load more"}
+        </button>
+      )}
+      {error && <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">{error}</p>}
     </div>
   );
 }

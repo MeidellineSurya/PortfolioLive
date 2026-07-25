@@ -37,6 +37,16 @@ class YahooClient:
         self._subscribed: set[str] = set()
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Alpaca's push feed only ever fires on a genuine quote change —
+        # when the market's closed, it sends nothing at all. This poll
+        # loop runs on a fixed timer regardless of market state, so
+        # without tracking what was last emitted it would re-broadcast
+        # the same unchanged closing price every cycle while IDX is
+        # closed (most of the day) — flooding priceHistory with
+        # identical points and rendering as a flat horizontal sparkline
+        # instead of the "no live data" state Alpaca-backed tickers
+        # correctly show in the same situation.
+        self._last_emitted: dict[str, float] = {}
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -77,19 +87,28 @@ class YahooClient:
 
     async def _poll_forever(self) -> None:
         while not self._stop_event.is_set():
-            tickers = list(self._subscribed)
-            if tickers:
-                try:
-                    closes = await asyncio.to_thread(self._fetch_recent_closes, tickers)
-                    for ticker, prices in closes.items():
-                        if prices:
-                            await self._on_quote(ticker, prices[-1])
-                except Exception:
-                    logger.exception("Yahoo quote poll failed")
+            try:
+                await self._poll_once()
+            except Exception:
+                logger.exception("Yahoo quote poll failed")
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=POLL_INTERVAL_SECONDS)
             except asyncio.TimeoutError:
                 pass
+
+    async def _poll_once(self) -> None:
+        tickers = list(self._subscribed)
+        if not tickers:
+            return
+        closes = await asyncio.to_thread(self._fetch_recent_closes, tickers)
+        for ticker, prices in closes.items():
+            if not prices:
+                continue
+            price = prices[-1]
+            if self._last_emitted.get(ticker) == price:
+                continue
+            self._last_emitted[ticker] = price
+            await self._on_quote(ticker, price)
 
     # ---- news -----------------------------------------------------------
 

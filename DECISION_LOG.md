@@ -2067,3 +2067,105 @@ so nothing in the frontend needed to change.
   check above is what actually confirmed the cache-write path works.
   Test holding removed afterward; the user's own real BBCA.JK holding
   was left untouched.
+
+## Commit 28 — Fix: IDX sparkline showed a flat line when the market was closed
+
+**Files:** `backend/yahoo_client.py`, `backend/tests/test_yahoo_client.py`
+
+User-reported: US tickers showed no trend line at all (expected — US
+market was closed, a weekend), but `.JK` tickers showed a flat
+horizontal line instead of also showing nothing.
+
+- **Root cause: `YahooClient`'s poll loop had no concept of "nothing
+  changed."** `AlpacaClient`'s feed is push-based and only ever fires
+  `on_quote` on a genuine quote change — when the market's closed, it
+  sends nothing at all, so `priceHistory` never grows and the sparkline
+  correctly shows "—" (needs ≥2 points). `YahooClient`'s poll loop, by
+  contrast, runs on a fixed 20s timer *unconditionally* and was calling
+  `on_quote` every cycle with whatever the "latest close" happened to
+  be — which, with the IDX market closed (confirmed live: 17:50 WIB,
+  after the 09:00–15:50 WIB session), is the same unchanged value over
+  and over. Every one of those identical "ticks" got appended to
+  `priceHistory` on the frontend, rendering as a flat horizontal line —
+  visually indistinguishable from "the stock is trading in a razor-tight
+  range" when the real story is "there's no live session right now."
+
+- **Fix:** track the last price actually emitted per ticker
+  (`_last_emitted: dict[str, float]`) and skip calling `on_quote` when
+  the newly-polled price matches it. Extracted the per-cycle body into
+  `_poll_once()` (previously inlined in `_poll_forever`'s while loop) so
+  this could be tested directly rather than only through the full
+  loop-with-sleep machinery. Not cleared on `unsubscribe_quote` —
+  matches existing precedent (`WebSocketManager._last_prices` isn't
+  cleared on untrack either); the only cost is a re-tracked ticker's
+  first post-resubscribe tick being suppressed if the price genuinely
+  hasn't moved, which `WebSocketManager`'s own last-known-price cache
+  already covers for REST reads regardless.
+
+- Also clarified for the user, not fixed (because it's existing,
+  documented, correct behavior, not a bug): the reported "no news for
+  *any* stock, including old US ones" was the pipeline's pre-existing
+  "no replay for late-joining clients" constraint (README, Known
+  constraints) — this session's backend had been running continuously
+  since this feature's own live verification testing, so every
+  currently-available article across both sources had already been
+  broadcast once and deduped; a client connecting fresh afterward sees
+  nothing until either a genuinely new article appears or the backend
+  restarts. Confirmed via `docker logs`: both poll cycles were running
+  correctly the whole time (Alpaca: 3 tickers/50 articles, Yahoo: 2
+  tickers/5 articles, every cycle, no errors) — nothing was actually
+  broken. Restarting the container (needed anyway, for the sparkline
+  fix) reset the in-memory dedup set and produced a fresh broadcast,
+  confirmed via `/metrics` (`news_summaries_generated_total` jumped by
+  18 immediately on startup).
+
+- **Verification:** `ruff`/`pytest` (35 tests — 2 new, covering
+  `_poll_once` skipping an unchanged price across two cycles and still
+  emitting on a genuine change). Docker rebuild + restart; confirmed the
+  fresh-broadcast Groq/summary counts via `/metrics` matched the
+  restart-triggered rebroadcast, consistent with the dedup-reset
+  explanation above.
+
+## Commit 29 — Fix: "Load more" hidden for a ticker with zero live news yet
+
+**Files:** `frontend/app/components/NewsFeed.tsx`
+
+Follow-up to commit 28's "no news showing" investigation: NVDA and
+TLKM.JK both genuinely have fetchable news (confirmed directly via
+`GET /news/{ticker}`), and the advice given was "use Load more to see
+it immediately." The user then reported there's no Load more button on
+an individual ticker's tab at all.
+
+- **Root cause:** the button was nested inside the `visible.length > 0`
+  branch —
+  ```tsx
+  {visible.length === 0 ? (
+    <p>No news yet…</p>
+  ) : (
+    <div>{/* items */}{selectedTicker && <button>Load more</button>}</div>
+  )}
+  ```
+  — so it only ever rendered when the selected ticker already had at
+  least one item to show. For a ticker with real news that just hasn't
+  had a live broadcast reach it yet (a newly-added `.JK` ticker; a US
+  ticker that lost out on Alpaca's shared 50-article batch to a more
+  news-active holding — see commit 28), `visible.length` is exactly
+  `0`, so the entire branch containing the button never rendered. The
+  one situation "Load more" exists to solve — bootstrapping a ticker's
+  news without waiting on WebSocket timing — was exactly the situation
+  where it was invisible.
+- The underlying fetch logic in `handleLoadMore` already handled an
+  empty `visible` correctly (`oldest = visible[visible.length - 1]` is
+  `undefined` when empty, so `before` is simply omitted — "give me the
+  most recent items," exactly right for a first fetch). This was purely
+  a rendering bug, not a logic bug.
+- **Fix:** flattened the three render blocks (empty message / item
+  list / load-more button+error) into independent siblings instead of
+  one nested ternary, so the button (and its error text) render
+  whenever a specific ticker is selected, regardless of how many items
+  are currently visible for it.
+- **Verification:** `tsc`/`eslint` clean. Playwright, against the real
+  running app: selected the NVDA tab (confirmed "No news yet" showing,
+  confirmed the Load more button was nonetheless visible), clicked it,
+  and confirmed real NVDA articles appeared — screenshotted before and
+  after. Zero console/page errors.

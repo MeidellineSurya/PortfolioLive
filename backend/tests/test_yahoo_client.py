@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from yahoo_client import YahooClient
 
@@ -75,3 +75,41 @@ def test_fetch_news_passes_limit_as_count():
     asyncio.run(run())
 
     mock_ticker.get_news.assert_called_once_with(count=7)
+
+
+def test_poll_once_skips_a_ticker_whose_price_is_unchanged():
+    # Alpaca's push feed only fires on a genuine quote change; when the
+    # market's closed it sends nothing. This poll loop runs on a fixed
+    # timer regardless, so it must suppress re-emitting an unchanged
+    # price itself, or a closed-market ticker would get a flood of
+    # identical ticks (and a flat sparkline) instead of the "no live
+    # data right now" state an Alpaca-backed ticker correctly shows.
+    on_quote = AsyncMock()
+
+    async def run():
+        client = YahooClient(on_quote)
+        await client.subscribe_quote("TLKM.JK")
+        with patch.object(client, "_fetch_recent_closes", return_value={"TLKM.JK": [2600.0, 2600.0]}):
+            await client._poll_once()
+            await client._poll_once()
+
+    asyncio.run(run())
+
+    on_quote.assert_awaited_once_with("TLKM.JK", 2600.0)
+
+
+def test_poll_once_still_emits_on_a_genuine_price_change():
+    on_quote = AsyncMock()
+    responses = iter([{"TLKM.JK": [2600.0, 2600.0]}, {"TLKM.JK": [2600.0, 2630.0]}])
+
+    async def run():
+        client = YahooClient(on_quote)
+        await client.subscribe_quote("TLKM.JK")
+        with patch.object(client, "_fetch_recent_closes", side_effect=lambda tickers: next(responses)):
+            await client._poll_once()
+            await client._poll_once()
+
+    asyncio.run(run())
+
+    assert on_quote.await_args_list[0].args == ("TLKM.JK", 2600.0)
+    assert on_quote.await_args_list[1].args == ("TLKM.JK", 2630.0)
