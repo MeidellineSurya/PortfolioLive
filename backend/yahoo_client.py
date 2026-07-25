@@ -23,11 +23,12 @@ import logging
 
 import yfinance as yf
 
-from alpaca_client import OnQuote
+from alpaca_client import NewsArticle, OnQuote
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 20
+NEWS_FETCH_LIMIT = 5
 
 
 class YahooClient:
@@ -89,6 +90,55 @@ class YahooClient:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=POLL_INTERVAL_SECONDS)
             except asyncio.TimeoutError:
                 pass
+
+    # ---- news -----------------------------------------------------------
+
+    async def fetch_news(self, tickers: list[str], limit: int = NEWS_FETCH_LIMIT) -> list[NewsArticle]:
+        """Mirrors AlpacaClient.fetch_news's contract as closely as
+        yfinance allows. Unlike price data, yfinance has no batched
+        multi-ticker news call (verified live: Ticker.get_news is
+        per-symbol) — this loops per ticker, each blocking call pushed to
+        a worker thread. Wrapped per-ticker, not just once around the
+        whole loop: yfinance's news endpoint can raise on a single bad
+        response (YFDataException/JSONDecodeError, seen in its source),
+        and one ticker failing shouldn't drop every other ticker's news
+        for that poll cycle.
+        """
+        articles: list[NewsArticle] = []
+        for ticker in tickers:
+            try:
+                raw_items = await asyncio.to_thread(yf.Ticker(ticker).get_news, count=limit)
+            except Exception:
+                logger.exception("Yahoo news fetch failed for %s", ticker)
+                continue
+            for item in raw_items:
+                article = self._to_article(ticker, item)
+                if article is not None:
+                    articles.append(article)
+        return articles
+
+    @staticmethod
+    def _to_article(ticker: str, item: dict) -> NewsArticle | None:
+        # A Yahoo fetch is already scoped to one ticker (unlike Alpaca's
+        # articles, which can tag several) — symbols is a singleton list
+        # so NewsService's existing per-symbol bucketing logic (built for
+        # Alpaca's multi-symbol case) works unchanged for either source.
+        try:
+            content = item["content"]
+            return NewsArticle(
+                id=str(item["id"]),
+                headline=content["title"],
+                summary=content.get("summary") or content["title"],
+                url=content["canonicalUrl"]["url"],
+                published_at=content["pubDate"],
+                symbols=[ticker],
+            )
+        except (KeyError, TypeError):
+            # yfinance's news response is unofficial/undocumented and has
+            # been observed to include sparse or malformed entries — skip
+            # rather than let one bad article drop the rest of the batch.
+            logger.warning("skipping malformed Yahoo news article for %s", ticker)
+            return None
 
     @staticmethod
     def _fetch_recent_closes(tickers: list[str]) -> dict[str, list[float]]:

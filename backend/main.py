@@ -102,6 +102,7 @@ async def lifespan(app: FastAPI):
     manager = WebSocketManager(alpaca_client, yahoo_client, store, watchlist_store)
     news_service = NewsService(
         alpaca_client=alpaca_client,
+        yahoo_client=yahoo_client,
         portfolio_store=store,
         watchlist_store=watchlist_store,
         ws_manager=manager,
@@ -146,6 +147,7 @@ async def lifespan(app: FastAPI):
         # timeout eventually notices the client is gone.
         await alpaca_client.stop()
         await yahoo_client.stop()
+        await news_service.stop()
         await store.close()
         await watchlist_store.close()
         await alert_store.close()

@@ -1955,3 +1955,115 @@ free push/streaming feed exists for it.
   holdings simply produce no news items, a separate feature if ever
   wanted; no generic multi-exchange framework — this is `.JK`-specific,
   not a pluggable "add any exchange" system.
+
+## Commit 27 — Indonesian (IDX) news via Yahoo Finance
+
+**Files:** `backend/alpaca_client.py`, `backend/yahoo_client.py`,
+`backend/news_service.py`, `backend/main.py`,
+`backend/tests/test_yahoo_client.py`
+
+Follow-up to commit 26: `.JK` holdings/watchlist entries showed "No news
+yet" forever, since the news pipeline only ever asked Alpaca, which has
+no Indonesia coverage. Confirmed live before writing any code that
+`yfinance` (already a dependency, added for IDX prices) has a working
+`Ticker.get_news()` endpoint that does return articles for `.JK` tickers
+(TLKM.JK → 7, BMRI.JK → 4 in a live test; BBCA.JK → 0 at the time, not
+every ticker has recent coverage) — English-language market coverage
+surfaced via Yahoo, not local Indonesian-language reporting, but real
+and usable. Backend-only: `NewsItem` carries no currency/money fields,
+so nothing in the frontend needed to change.
+
+- **`NewsArticle` (alpaca_client.py) widened from an Alpaca-only shape
+  to a genuinely shared one.** `id: int` → `id: int | str` — Alpaca's
+  ids are ints, Yahoo's are UUID-like strings. `NewsService`'s dedup set
+  (`_broadcast_ids: set[int]` → `set[str]`) stringifies at the handful
+  of check/add sites (`_handle_batch`, `get_more_news`) rather than
+  changing either source's native id type. The Redis cache key
+  (`news_summary:{article.id}`) needed no change — already
+  string-agnostic via f-string interpolation. Not worth a
+  source-prefixed composite key: Yahoo's UUID-like strings colliding
+  with Alpaca's small integers after `str()` isn't a realistic risk for
+  a personal project.
+
+- **No new polling-loop abstraction — `_handle_batch` reused as-is.**
+  Confirmed by reading it first: it already takes a plain
+  `list[NewsArticle]` and does bucket-by-symbol → dedup → summarise →
+  broadcast without anything Alpaca-specific in it. A new
+  `NewsService._poll_yahoo_news_forever` loop (same 60s cadence reusing
+  `alpaca_client.NEWS_POLL_INTERVAL_SECONDS`, same "wrap the whole body
+  in try/except so a crash never kills the loop" shape as
+  `AlpacaClient._poll_news_forever`) fetches tracked `.JK` tickers via
+  `YahooClient.fetch_news` and calls `self._handle_batch(articles)`
+  directly — no extraction or refactor needed. A Yahoo fetch is already
+  scoped to one ticker (unlike Alpaca's articles, which can tag several
+  via `symbols`), so `YahooClient._to_article` just sets
+  `symbols=[ticker]` — the existing per-symbol bucketing logic (built
+  for Alpaca's multi-symbol case) works unchanged for a singleton list
+  too, no special-casing required.
+
+- **Ticker routing reuses `currency_for_ticker`** (models.py — the same
+  helper `websocket_manager.py` already uses for price routing) via two
+  small filters built on the existing `_get_tracked_tickers`:
+  `_get_tracked_us_tickers`/`_get_tracked_idx_tickers`. Alpaca's
+  `get_tickers` callback (passed to `start_news_polling`) switched to
+  the US-only filter, so Alpaca is no longer asked about symbols it can
+  never have news for — wasteful, not wrong (Alpaca would just return
+  nothing for them), but pointless.
+
+- **`get_more_news` (the `GET /news/{ticker}` load-more route) routes
+  the same way**: IDR calls `YahooClient.fetch_news` instead of
+  Alpaca's. One limitation documented in the method's docstring rather
+  than silently accepted: yfinance's `get_news` takes only a result
+  `count`, no date-cursor like Alpaca's inclusive `end` filter — a `.JK`
+  ticker's "load more" can't truly page backwards in time. It re-fetches
+  the same recent window and relies on `_broadcast_ids` to filter out
+  anything already seen, which looks correct early on but will surface
+  fewer/no new results sooner than the equivalent US ticker would.
+
+- **`YahooClient.fetch_news` loops per ticker, not batched** — verified
+  live that yfinance has no multi-ticker news call the way its price
+  `download()` does. Each blocking `get_news(count=...)` call is pushed
+  through `asyncio.to_thread`; each is wrapped in its own try/except
+  (confirmed via `inspect.getsource` that `get_news` can raise
+  `YFDataException`/`JSONDecodeError` on a bad response), and each raw
+  article is mapped through `_to_article`, itself wrapped in a
+  try/except for missing/malformed keys — yfinance's news response is
+  unofficial and undocumented, so a bad response from one ticker or one
+  malformed article must not drop everything else in the batch.
+
+- **`NewsService` gained a `stop()` method it didn't have before.**
+  Previously its only background task lived inside `AlpacaClient`
+  (cleaned up by `AlpacaClient.stop()`); the new Yahoo polling loop is
+  owned directly by `NewsService`, so it needs its own shutdown path.
+  Added `await news_service.stop()` to `main.py`'s lifespan `finally`
+  block alongside the other client/store teardown calls.
+
+- **Added logging to the new poll loop mid-verification, not as an
+  afterthought.** The first live check showed the loop running (no
+  crash) but gave no way to tell *what* it was doing — Alpaca's
+  equivalent loop logs "N ticker(s)" / "fetched N article(s)" every
+  cycle, and the new loop originally didn't. Added matching log lines
+  before trusting the result, rather than declaring success from silence.
+
+- **Verification:** `ruff`/`pytest` (33 tests total, including a new
+  `test_yahoo_client.py` covering `_to_article`'s mapping — well-formed
+  input, blank-summary fallback to headline, malformed input returning
+  `None` — and `fetch_news` skipping one failing ticker without
+  dropping the others' articles). Live end to end against a rebuilt
+  Docker image: added a real TLKM.JK holding (chosen because it has
+  real recent coverage, unlike BBCA.JK which had none when checked),
+  watched the new "yahoo news poll cycle: N ticker(s)" / "fetched N
+  article(s)" log lines appear on schedule, confirmed via
+  `GET /news/TLKM.JK` real headlines with real Groq-generated
+  summaries ("Market unaffected by Telkom's $2.16 billion spin-off
+  deal." — under 20 words, doesn't start with "The", matching the
+  summarisation system prompt's own rules exactly) and real published
+  timestamps. Also confirmed via `/metrics` that Groq call counts and
+  cache-hit/miss counters incremented correctly across both sources
+  through the shared `_build_news_item`/`_summarise_cached` path.
+  Verifying the Redis summary cache directly came up empty on the first
+  attempt — not a bug, just checking after the 5-minute TTL had already
+  expired relative to when the writes happened; the load-more endpoint
+  check above is what actually confirmed the cache-write path works.
+  Test holding removed afterward; the user's own real BBCA.JK holding
+  was left untouched.

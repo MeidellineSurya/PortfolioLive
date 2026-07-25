@@ -54,7 +54,15 @@ GetTickers = Callable[[], Awaitable["list[str]"]]
 
 @dataclass(frozen=True)
 class NewsArticle:
-    id: int
+    """A shared shape, not an Alpaca-only one: yahoo_client.py's
+    fetch_news produces these too, for Indonesia (.JK) tickers Alpaca
+    has no coverage for. ``id`` is ``int | str`` because the two
+    sources' native id types differ (Alpaca: int, Yahoo: a UUID-like
+    string) — NewsService's dedup set and Redis cache key both handle
+    either transparently.
+    """
+
+    id: int | str
     headline: str
     summary: str
     url: str

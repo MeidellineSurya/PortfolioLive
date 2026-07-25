@@ -37,10 +37,12 @@ flowchart LR
 
     aws -- "price ticks" --> ac
     arest -- "articles" --> ac
-    yahoo -- "20s poll" --> yc
+    yahoo -- "20s price poll" --> yc
+    yahoo -- "60s news poll" --> yc
     ac -- "on_quote" --> wm
     yc -- "on_quote" --> wm
     ac -- "60s poll batches" --> ns
+    yc -- "60s poll batches" --> ns
     ns -- "summarise" --> groq
     ns <-- "cache summaries" --> redis
     ps <-- "holdings" --> redis
@@ -61,9 +63,11 @@ route to a separate `YahooClient` instead (no Alpaca coverage there),
 polled every 20s rather than pushed, since Yahoo's free/unofficial data
 has no streaming feed — but both clients feed the exact same
 `on_quote(ticker, price)` callback into `WebSocketManager`, which is
-itself source-agnostic. News is polled over REST every 60s (not
-streamed), summarised one sentence at a time by Groq, cached in Redis,
-and pushed to clients over the same WebSocket as price ticks.
+itself source-agnostic. News works the same way: both Alpaca (US
+tickers) and `YahooClient` (`.JK` tickers) poll over REST every 60s and
+feed the same `NewsService` batch-handling pipeline — summarised one
+sentence at a time by Groq, cached in Redis, deduplicated, and pushed to
+clients over the same WebSocket as price ticks, regardless of source.
 
 Full rationale for every non-obvious decision in this codebase — why the
 Alpaca stream runs on its own thread, why `useReducer` vs `useState`,
@@ -80,8 +84,9 @@ why the Docker `CMD` needs `exec`, and so on — is in
 - Watchlist — track a ticker's live price and news without owning it;
   doesn't count toward P&L, auto-migrates to your holdings if you buy it
 - AI-summarised news (one sentence, market-focused) per holding or
-  watchlist ticker, with ticker tabs to filter and "Load more" to page
-  further back in history
+  watchlist ticker — both US (Alpaca) and Indonesian (Yahoo Finance)
+  tickers — with ticker tabs to filter and "Load more" to page further
+  back in history
 - Price alerts (on holdings or watchlist tickers) — set a target, get a
   toast when it crosses; fired alerts stay visible instead of disappearing
 - Portfolio analytics (`/analytics`) — total return, 30-day P&L% history,
@@ -260,6 +265,14 @@ instead — browsers can't set custom headers on a WS handshake).
   Value/P&L (dashboard header, analytics) render one block per currency
   present rather than one FX-converted number — a deliberate choice, not
   a missing feature.
+- **Indonesian news is English-language market coverage, not local
+  reporting.** Yahoo Finance's `.JK` news (`yahoo_client.py`) surfaces
+  things like Zacks-style comparison pieces, not Indonesian-language
+  financial journalism — real and usable, just not the same character
+  as what a local IDX news source would give you. It also can't be
+  paged as far back as US tickers can: yfinance's news endpoint takes
+  only a result count, no date cursor, so "Load more" for a `.JK`
+  ticker runs out of new results sooner than the equivalent US one.
 - **News has no replay for late-joining clients.** Broadcasts are
   push-only — a client that connects after a ticker's news has already
   gone out over the socket won't see it until either new articles appear
