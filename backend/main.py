@@ -44,6 +44,7 @@ from news_service import NewsService
 from portfolio_store import PortfolioStore
 from watchlist_store import WatchlistStore
 from websocket_manager import WebSocketManager
+from yahoo_client import YahooClient
 
 load_dotenv()
 
@@ -92,8 +93,13 @@ async def lifespan(app: FastAPI):
         secret_key=os.environ["ALPACA_SECRET_KEY"],
         on_quote=on_quote,
     )
+    # Alpaca has no Indonesia coverage; .JK-suffixed tickers are polled
+    # from Yahoo Finance instead (yahoo_client.py) but feed the exact
+    # same on_quote callback, so WebSocketManager's tick-handling logic
+    # doesn't need to branch on where a given tick came from.
+    yahoo_client = YahooClient(on_quote=on_quote)
     watchlist_store = WatchlistStore(os.environ["REDIS_URL"])
-    manager = WebSocketManager(alpaca_client, store, watchlist_store)
+    manager = WebSocketManager(alpaca_client, yahoo_client, store, watchlist_store)
     news_service = NewsService(
         alpaca_client=alpaca_client,
         portfolio_store=store,
@@ -116,6 +122,7 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.watchlist_store = watchlist_store
     app.state.alpaca_client = alpaca_client
+    app.state.yahoo_client = yahoo_client
     app.state.ws_manager = manager
     app.state.news_service = news_service
     app.state.alert_service = alert_service
@@ -123,6 +130,7 @@ async def lifespan(app: FastAPI):
     app.state.auth_service = auth_service
 
     alpaca_client.start()
+    yahoo_client.start()
     try:
         await auth_service.bootstrap_user(os.environ["AUTH_USERNAME"], os.environ["AUTH_PASSWORD"])
         await manager.load_initial_holdings()
@@ -137,6 +145,7 @@ async def lifespan(app: FastAPI):
         # locking out every subsequent start until Alpaca's own server-side
         # timeout eventually notices the client is gone.
         await alpaca_client.stop()
+        await yahoo_client.stop()
         await store.close()
         await watchlist_store.close()
         await alert_store.close()
@@ -214,7 +223,9 @@ async def add_holding(holding: Holding) -> Holding:
 async def remove_holding(ticker: str) -> None:
     ticker = ticker.strip().upper()
     if not TICKER_RE.match(ticker):
-        raise HTTPException(status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z)")
+        raise HTTPException(
+            status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z), optionally suffixed with .JK"
+        )
 
     store: PortfolioStore = app.state.store
     if await store.get_holding(ticker) is None:
@@ -253,7 +264,9 @@ async def add_to_watchlist(item: WatchlistAdd) -> WatchlistItem:
 async def remove_from_watchlist(ticker: str) -> None:
     ticker = ticker.strip().upper()
     if not TICKER_RE.match(ticker):
-        raise HTTPException(status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z)")
+        raise HTTPException(
+            status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z), optionally suffixed with .JK"
+        )
 
     watchlist_store: WatchlistStore = app.state.watchlist_store
     if not await watchlist_store.has_ticker(ticker):
@@ -273,7 +286,9 @@ async def get_more_news(ticker: str, before: datetime | None = None, limit: int 
     """
     ticker = ticker.strip().upper()
     if not TICKER_RE.match(ticker):
-        raise HTTPException(status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z)")
+        raise HTTPException(
+            status_code=400, detail="ticker must be 1-5 uppercase letters (A-Z), optionally suffixed with .JK"
+        )
     limit = max(1, min(limit, 20))
 
     news_service: NewsService = app.state.news_service

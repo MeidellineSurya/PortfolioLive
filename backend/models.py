@@ -6,14 +6,24 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
+# A bare `[A-Z]{1,5}` ticker is US (Alpaca); a `.JK`-suffixed one is an
+# Indonesia Stock Exchange ticker (e.g. BBCA.JK), routed to Yahoo Finance
+# instead — see yahoo_client.py and currency_for_ticker below. The suffix
+# is the single signal both for "which data source" and "which currency
+# this is priced in"; no separate exchange/currency field is stored
+# anywhere, it's always derived from the ticker string itself.
+TICKER_RE = re.compile(r"^[A-Z]{1,5}(\.JK)?$")
 
 
 def _validate_ticker(v: str) -> str:
     v = v.strip().upper()
     if not TICKER_RE.match(v):
-        raise ValueError("ticker must be 1-5 uppercase letters (A-Z)")
+        raise ValueError("ticker must be 1-5 uppercase letters (A-Z), optionally suffixed with .JK")
     return v
+
+
+def currency_for_ticker(ticker: str) -> Literal["USD", "IDR"]:
+    return "IDR" if ticker.endswith(".JK") else "USD"
 
 
 class Holding(BaseModel):
@@ -45,6 +55,9 @@ class HoldingWithPrice(Holding):
     """
 
     price: float | None = None
+    # Unlike price (unknown until the first tick arrives), currency is a
+    # property of the ticker itself and is always known immediately.
+    currency: Literal["USD", "IDR"]
     position_value: float | None = None
     position_pnl: float | None = None
     position_pnl_pct: float | None = None
@@ -54,6 +67,7 @@ class PriceUpdate(BaseModel):
     type: Literal["price_update"] = "price_update"
     ticker: str
     price: float
+    currency: Literal["USD", "IDR"]
     change: float
     change_pct: float
     position_value: float
@@ -102,11 +116,23 @@ class HoldingSnapshot(BaseModel):
     pnl_pct: float
 
 
-class PortfolioSnapshot(BaseModel):
-    timestamp: str
+class CurrencyTotals(BaseModel):
     total_value: float
     total_pnl: float
     total_pnl_pct: float
+
+
+class PortfolioSnapshot(BaseModel):
+    """Totals are segregated by currency, not summed into one number —
+    a $ amount and an Rp amount can't be added together without an FX
+    conversion this app deliberately doesn't do (see DECISION_LOG). Keyed
+    by currency code ("USD"/"IDR") and only populated for currencies that
+    actually have holdings at snapshot time, rather than fixed fields for
+    every currency this app happens to support today.
+    """
+
+    timestamp: str
+    totals: dict[str, CurrencyTotals]
     holdings: dict[str, HoldingSnapshot]
 
 
@@ -116,8 +142,7 @@ class PerformanceEntry(BaseModel):
 
 
 class AnalyticsResponse(BaseModel):
-    total_pnl: float
-    total_pnl_pct: float
+    totals: dict[str, CurrencyTotals]
     history: list[PortfolioSnapshot]
     best_performer_7d: PerformanceEntry | None
     worst_performer_7d: PerformanceEntry | None
@@ -155,6 +180,7 @@ class WatchlistItemWithPrice(WatchlistItem):
     """
 
     price: float | None = None
+    currency: Literal["USD", "IDR"]
     change: float | None = None
     change_pct: float | None = None
 
@@ -172,5 +198,6 @@ class WatchlistPriceUpdate(BaseModel):
     type: Literal["watchlist_price_update"] = "watchlist_price_update"
     ticker: str
     price: float
+    currency: Literal["USD", "IDR"]
     change: float
     change_pct: float

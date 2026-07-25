@@ -2,7 +2,9 @@
 
 A real-time portfolio dashboard: live stock prices, live P&L, AI-summarised
 news, price alerts, a watchlist, and performance analytics — behind a
-single-user login, all on top of one shared WebSocket connection.
+single-user login, all on top of one shared WebSocket connection. Covers
+both US equities (Alpaca) and Indonesian stocks (Yahoo Finance, `.JK`
+tickers), with USD/IDR totals kept separate rather than FX-converted.
 
 ## Architecture
 
@@ -13,12 +15,14 @@ flowchart LR
         arest["REST\n(news + snapshots)"]
     end
 
+    yahoo["Yahoo Finance\n(unofficial, .JK tickers)"]
     groq["Groq API\n(llama-3.3-70b)"]
     redis[("Redis")]
 
     subgraph backend["FastAPI backend"]
         routes["main.py\n(REST routes)"]
         ac["AlpacaClient"]
+        yc["YahooClient"]
         ns["NewsService"]
         wm["WebSocketManager"]
         ps["PortfolioStore"]
@@ -33,7 +37,9 @@ flowchart LR
 
     aws -- "price ticks" --> ac
     arest -- "articles" --> ac
+    yahoo -- "20s poll" --> yc
     ac -- "on_quote" --> wm
+    yc -- "on_quote" --> wm
     ac -- "60s poll batches" --> ns
     ns -- "summarise" --> groq
     ns <-- "cache summaries" --> redis
@@ -48,11 +54,16 @@ flowchart LR
     ui --> browser
 ```
 
-One Alpaca WebSocket connection is shared across every holding and every
-connected browser tab — prices come in once from Alpaca and fan out to N
-clients, not N Alpaca connections. News is polled over REST every 60s
-(not streamed), summarised one sentence at a time by Groq, cached in
-Redis, and pushed to clients over the same WebSocket as price ticks.
+One Alpaca WebSocket connection is shared across every US holding and
+every connected browser tab — prices come in once from Alpaca and fan
+out to N clients, not N Alpaca connections. Indonesian (`.JK`) tickers
+route to a separate `YahooClient` instead (no Alpaca coverage there),
+polled every 20s rather than pushed, since Yahoo's free/unofficial data
+has no streaming feed — but both clients feed the exact same
+`on_quote(ticker, price)` callback into `WebSocketManager`, which is
+itself source-agnostic. News is polled over REST every 60s (not
+streamed), summarised one sentence at a time by Groq, cached in Redis,
+and pushed to clients over the same WebSocket as price ticks.
 
 Full rationale for every non-obvious decision in this codebase — why the
 Alpaca stream runs on its own thread, why `useReducer` vs `useState`,
@@ -83,6 +94,10 @@ why the Docker `CMD` needs `exec`, and so on — is in
   ticks can arrive several times a second, and alerts still see every raw
   tick (so a brief threshold crossing is never missed), but the UI only
   needs a steady cadence, not every microstructure flicker
+- Indonesian stocks (IDX, `.JK` tickers e.g. `BBCA.JK`) alongside US
+  equities — priced in IDR, polled from Yahoo Finance every 20s; Total
+  Value/P&L and analytics are shown as separate USD and IDR totals, not
+  FX-converted into one number
 
 ## Tech stack
 
@@ -91,7 +106,7 @@ why the Docker `CMD` needs `exec`, and so on — is in
 | Backend | Python, FastAPI, WebSockets, Redis, [alpaca-py](https://github.com/alpacahq/alpaca-py) |
 | Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS, Recharts |
 | AI | Groq (`llama-3.3-70b-versatile`) for one-line news summaries |
-| Data | Alpaca Markets (free tier — 15-minute delayed IEX feed) |
+| Data | Alpaca Markets (free tier — 15-minute delayed IEX feed, US equities); Yahoo Finance (unofficial, `.JK` Indonesia tickers, via [`yfinance`](https://github.com/ranaroussi/yfinance)) |
 | Deploy | Railway (backend, via Docker), Vercel (frontend) |
 
 ## Project structure
@@ -100,6 +115,7 @@ why the Docker `CMD` needs `exec`, and so on — is in
 backend/
   main.py                 FastAPI app, routes, WS endpoint, lifespan wiring
   alpaca_client.py        Alpaca WebSocket price stream + REST news polling
+  yahoo_client.py         Yahoo Finance REST polling for Indonesia (.JK) tickers
   websocket_manager.py    Fans price ticks out to connected frontend clients
   news_service.py         Groq summarisation, caching, dedup, broadcast
   portfolio_store.py      Redis-backed holdings CRUD
@@ -224,14 +240,26 @@ instead — browsers can't set custom headers on a WS handshake).
 
 ## Known constraints
 
-- **15-minute delayed data.** Alpaca's free tier uses the IEX feed, not
-  full SIP — fine for a dashboard, not for trading decisions.
-- **US-listed equities only.** A consequence of using Alpaca's *stock*
-  data endpoints specifically (`StockDataStream`, stock news) — Alpaca
-  also has crypto data, but this app doesn't touch it. Ticker validation
-  itself doesn't enforce this; an invalid or unsupported ticker just sits
-  with `—` placeholders forever, since it's subscribed but never receives
-  data.
+- **15-minute delayed data (US tickers).** Alpaca's free tier uses the
+  IEX feed, not full SIP — fine for a dashboard, not for trading
+  decisions.
+- **US equities and Indonesian (IDX) stocks only.** A consequence of
+  using Alpaca's *stock* data endpoints specifically (Alpaca also has
+  crypto data, untouched here) plus Yahoo Finance's `.JK`-suffixed
+  quotes for Indonesia. Ticker validation itself doesn't enforce
+  anything beyond the `[A-Z]{1,5}` / `[A-Z]{1,5}.JK` shape; a
+  syntactically valid but unsupported/delisted ticker just sits with `—`
+  placeholders forever, since it's subscribed but never receives data.
+- **Yahoo Finance's `.JK` data is unofficial and polled, not pushed.**
+  There's no free/public streaming feed for it, so Indonesian prices
+  update on a 20s cycle (`yahoo_client.py`) rather than near-instantly
+  like Alpaca's WebSocket — and being unofficial, it carries more
+  reliability/ToS risk than Alpaca's licensed feed. Fine for a personal
+  dashboard, not a guarantee for anything more serious.
+- **USD and IDR totals are shown separately, never combined.** Total
+  Value/P&L (dashboard header, analytics) render one block per currency
+  present rather than one FX-converted number — a deliberate choice, not
+  a missing feature.
 - **News has no replay for late-joining clients.** Broadcasts are
   push-only — a client that connects after a ticker's news has already
   gone out over the socket won't see it until either new articles appear
@@ -254,6 +282,6 @@ instead — browsers can't set custom headers on a WS handshake).
 - API keys are backend-only, read from environment variables, never
   exposed to the frontend
 - CORS restricted to a single configured `FRONTEND_ORIGIN`
-- Ticker input validated (uppercase letters, 1–5 chars) on both frontend
-  and backend
+- Ticker input validated (uppercase letters, 1–5 chars, optionally
+  suffixed with `.JK`) on both frontend and backend
 - `/portfolio/add` capped at 50 holdings total

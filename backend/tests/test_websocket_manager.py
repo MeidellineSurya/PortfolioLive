@@ -24,7 +24,10 @@ class FakeWatchlistStore:
 def manager():
     holding = Holding(ticker="AAPL", quantity=10, avg_cost=100)
     return WebSocketManager(
-        alpaca_client=None, portfolio_store=FakePortfolioStore(holding), watchlist_store=FakeWatchlistStore()
+        alpaca_client=None,
+        yahoo_client=None,
+        portfolio_store=FakePortfolioStore(holding),
+        watchlist_store=FakeWatchlistStore(),
     )
 
 
@@ -79,3 +82,52 @@ def test_throttled_ticks_still_reach_quote_listeners(manager):
     # rely on seeing every raw tick to detect a brief crossing), even
     # though only the first tick in this window was actually broadcast.
     assert seen == [("AAPL", 200.0, 205.0), ("AAPL", 205.0, 195.0)]
+
+
+def test_on_quote_attaches_currency_derived_from_ticker_suffix():
+    holding = Holding(ticker="BBCA.JK", quantity=10, avg_cost=6000)
+    manager = WebSocketManager(
+        alpaca_client=None,
+        yahoo_client=None,
+        portfolio_store=FakePortfolioStore(holding),
+        watchlist_store=FakeWatchlistStore(),
+    )
+
+    async def run():
+        manager.broadcast = AsyncMock()
+        await manager.on_quote("BBCA.JK", 6275.0)
+
+    asyncio.run(run())
+
+    broadcast_message = manager.broadcast.await_args.args[0]
+    assert broadcast_message["currency"] == "IDR"
+
+
+def test_track_ticker_routes_to_the_client_matching_the_tickers_currency():
+    class FakeClient:
+        def __init__(self):
+            self.subscribe_quote = AsyncMock()
+            self.unsubscribe_quote = AsyncMock()
+            self.get_previous_close = AsyncMock(return_value=None)
+
+    alpaca_client = FakeClient()
+    yahoo_client = FakeClient()
+    manager = WebSocketManager(
+        alpaca_client=alpaca_client,
+        yahoo_client=yahoo_client,
+        portfolio_store=FakePortfolioStore(None),
+        watchlist_store=FakeWatchlistStore(),
+    )
+
+    async def run():
+        await manager.track_ticker("AAPL")
+        await manager.track_ticker("BBCA.JK")
+        await manager.untrack_ticker("AAPL")
+        await manager.untrack_ticker("BBCA.JK")
+
+    asyncio.run(run())
+
+    alpaca_client.subscribe_quote.assert_awaited_once_with("AAPL")
+    alpaca_client.unsubscribe_quote.assert_awaited_once_with("AAPL")
+    yahoo_client.subscribe_quote.assert_awaited_once_with("BBCA.JK")
+    yahoo_client.unsubscribe_quote.assert_awaited_once_with("BBCA.JK")

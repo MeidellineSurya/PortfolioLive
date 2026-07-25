@@ -4,6 +4,26 @@
 // alias config, so keeping these types snake_case avoids a translation
 // layer for every message that crosses the WebSocket.
 
+// A ticker's currency is always derived from its symbol (a bare US
+// ticker vs. a .JK-suffixed Indonesia one — backend/models.py's
+// currency_for_ticker), never chosen or stored separately, and the
+// backend always includes it explicitly on every price-bearing payload
+// rather than the frontend re-deriving it from the ticker string itself
+// — one source of truth for something that affects money formatting.
+export type Currency = "USD" | "IDR";
+
+// The one deliberate exception to "always take currency from the
+// backend": an optimistic local placeholder (page.tsx's ADD_TICKER)
+// exists for a moment before any server response arrives at all, so
+// there's nothing from the backend to take currency from yet. Mirrors
+// backend/models.py's currency_for_ticker, the same way
+// AddTickerForm.tsx already mirrors TICKER_RE for the same optimistic-UI
+// reason — not a second source of truth for data that actually came
+// from the wire.
+export function currencyForTicker(ticker: string): Currency {
+  return ticker.endsWith(".JK") ? "IDR" : "USD";
+}
+
 export type Holding = {
   ticker: string;
   quantity: number;
@@ -15,9 +35,11 @@ export type Holding = {
 // (commit 17) — absent entirely, not null, when unknown, since the
 // backend serializes with exclude_none. This is what lets the table show
 // real numbers on first load instead of always starting blank until the
-// next live tick.
+// next live tick. `currency` is the one field always present regardless
+// of whether a price has arrived yet.
 export type HoldingWithPrice = Holding & {
   price?: number;
+  currency: Currency;
   position_value?: number;
   position_pnl?: number;
   position_pnl_pct?: number;
@@ -27,6 +49,7 @@ export type PriceUpdate = {
   type: "price_update";
   ticker: string;
   price: number;
+  currency: Currency;
   change: number;
   change_pct: number;
   position_value: number;
@@ -63,6 +86,7 @@ export type WatchlistPriceUpdate = {
   type: "watchlist_price_update";
   ticker: string;
   price: number;
+  currency: Currency;
   change: number;
   change_pct: number;
 };
@@ -73,6 +97,7 @@ export type WSMessage = PriceUpdate | NewsItem | PriceAlertTriggered | Watchlist
 export type WatchlistItem = {
   ticker: string;
   price?: number;
+  currency: Currency;
   change?: number;
   change_pct?: number;
 };
@@ -97,11 +122,19 @@ export type HoldingSnapshot = {
   pnl_pct: number;
 };
 
-export type PortfolioSnapshot = {
-  timestamp: string;
+export type CurrencyTotals = {
   total_value: number;
   total_pnl: number;
   total_pnl_pct: number;
+};
+
+// Totals are keyed by currency, not a single pair of numbers — a $ total
+// and an Rp total can't be summed together without an FX conversion this
+// app deliberately doesn't do (see DECISION_LOG). Only currencies with
+// at least one holding at snapshot time have an entry.
+export type PortfolioSnapshot = {
+  timestamp: string;
+  totals: Record<string, CurrencyTotals>;
   holdings: Record<string, HoldingSnapshot>;
 };
 
@@ -111,8 +144,7 @@ export type PerformanceEntry = {
 };
 
 export type AnalyticsResponse = {
-  total_pnl: number;
-  total_pnl_pct: number;
+  totals: Record<string, CurrencyTotals>;
   history: PortfolioSnapshot[];
   best_performer_7d: PerformanceEntry | null;
   worst_performer_7d: PerformanceEntry | null;

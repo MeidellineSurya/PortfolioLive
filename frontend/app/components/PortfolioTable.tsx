@@ -73,6 +73,7 @@ function PortfolioRowView({
   const [targetPrice, setTargetPrice] = useState("");
   const hasLiveData = row.price !== undefined;
   const pnlPositive = (row.position_pnl ?? 0) >= 0;
+  const currency = row.currency ?? "USD";
 
   function handleSubmitAlert(event: FormEvent) {
     event.preventDefault();
@@ -87,22 +88,22 @@ function PortfolioRowView({
     <tr className="border-b border-neutral-100 last:border-0 dark:border-neutral-900">
       <td className="py-2 pr-4 font-medium">{row.ticker}</td>
       <td className="py-2 pr-4 tabular-nums">{row.quantity}</td>
-      <td className="py-2 pr-4 tabular-nums">{formatCurrency(row.avg_cost)}</td>
+      <td className="py-2 pr-4 tabular-nums">{formatCurrency(row.avg_cost, currency)}</td>
       <td className="py-2 pr-4 tabular-nums">
-        {hasLiveData ? formatCurrency(row.price!) : "—"}
+        {hasLiveData ? formatCurrency(row.price!, currency) : "—"}
       </td>
       <td className="py-2 pr-4">
         <PriceSparkline prices={row.priceHistory ?? []} />
       </td>
       <td className="py-2 pr-4 tabular-nums">
-        {row.position_value !== undefined ? formatCurrency(row.position_value) : "—"}
+        {row.position_value !== undefined ? formatCurrency(row.position_value, currency) : "—"}
       </td>
       <td
         className={`py-2 pr-4 tabular-nums ${
           hasLiveData ? (pnlPositive ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400") : ""
         }`}
       >
-        {row.position_pnl !== undefined ? formatSignedCurrency(row.position_pnl) : "—"}
+        {row.position_pnl !== undefined ? formatSignedCurrency(row.position_pnl, currency) : "—"}
       </td>
       <td
         className={`py-2 pr-4 tabular-nums ${
@@ -124,11 +125,11 @@ function PortfolioRowView({
               }`}
             >
               <span aria-hidden>{alert.triggered ? "✓" : "🔔"}</span>
-              {formatCurrency(alert.target_price)}
+              {formatCurrency(alert.target_price, currency)}
               <button
                 type="button"
                 onClick={() => onDeleteAlert(alert.id)}
-                aria-label={`Remove ${alert.triggered ? "fired" : "pending"} alert for ${row.ticker} at ${formatCurrency(alert.target_price)}`}
+                aria-label={`Remove ${alert.triggered ? "fired" : "pending"} alert for ${row.ticker} at ${formatCurrency(alert.target_price, currency)}`}
                 className="text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
               >
                 ×

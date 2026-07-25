@@ -1841,3 +1841,117 @@ against real Alpaca data rather than guessing at a single cause:
   visual confirmation of smoother sparklines under real flickering
   quotes, since none were available. Worth a live look once the market
   reopens.
+
+## Commit 26 — Indonesian (IDX) stock support via Yahoo Finance
+
+**Files:** `backend/models.py`, `backend/yahoo_client.py` (new),
+`backend/websocket_manager.py`, `backend/main.py`,
+`backend/analytics_service.py`, `backend/requirements.txt`,
+`backend/tests/test_models.py`, `backend/tests/test_websocket_manager.py`,
+`frontend/lib/types.ts`, `frontend/lib/format.ts`,
+`frontend/app/components/AddTickerForm.tsx`,
+`frontend/app/components/PortfolioTable.tsx`,
+`frontend/app/components/Watchlist.tsx`, `frontend/app/page.tsx`,
+`frontend/app/analytics/page.tsx`
+
+Requested by the user: track Indonesian stocks (IDX, e.g. BBCA.JK)
+alongside US holdings. Alpaca — the only data source until now — has no
+Indonesia coverage. Researched free alternatives first (see chat):
+iTick's free tier is real but too limited (5 REST calls/min, 3 WebSocket
+subscriptions total, Indonesia coverage on the free tier unconfirmed
+against contradictory docs) to build against. Landed on Yahoo Finance's
+unofficial `.JK`-suffixed quotes via `yfinance`, REST-polled since no
+free push/streaming feed exists for it.
+
+- **Currency is derived from the ticker suffix, never stored.** A new
+  `currency_for_ticker(ticker)` in `models.py` returns `"IDR"` for any
+  `.JK`-suffixed ticker, `"USD"` otherwise — recomputed on every read
+  rather than persisted, so `portfolio_store.py`/`watchlist_store.py`
+  needed zero schema changes. `TICKER_RE` changed from `^[A-Z]{1,5}$` to
+  `^[A-Z]{1,5}(\.JK)?$`, the single choke point already reused by three
+  route handlers in `main.py` and mirrored in three frontend files
+  (`AddTickerForm.tsx`, `Watchlist.tsx`, and formerly `page.tsx`'s own
+  copy) — same "mirrors the backend regex" pattern already established
+  in this codebase, not a new one.
+
+- **Totals are segregated by currency, not FX-converted** — an explicit
+  user decision (asked directly, since a $ total and an Rp total can't
+  be summed without a conversion this app doesn't perform). The
+  dashboard header and the analytics page's "Total Return" section each
+  now render one block per currency actually present among current
+  holdings (USD listed first when present), instead of one hardcoded
+  number. `AnalyticsResponse`/`PortfolioSnapshot`'s single
+  `total_pnl`/`total_pnl_pct` scalars became `totals: dict[str,
+  CurrencyTotals]`, keyed by currency. **This is a breaking change to
+  the stored snapshot shape** — the existing hourly-snapshot Redis
+  sorted set (`portfolio:snapshots`) predates per-currency totals and
+  can't be parsed under the new schema, so it was cleared as a
+  deliberate one-time reset rather than writing dual-schema backward-compat
+  parsing for a personal project's analytics history. Verified the
+  per-currency math directly against real numbers (10 AAPL @ $200→$220,
+  10 NVDA @ $200→$180, 100 BBCA.JK @ Rp6000→Rp6275): USD total_pnl
+  correctly nets to $0 (offsetting +$200/-$200), IDR total_pnl correctly
+  computes to +Rp27,500 (+4.58%), each independent of the other.
+
+- **`backend/yahoo_client.py` mirrors `AlpacaClient`'s public shape**
+  (`subscribe_quote`/`unsubscribe_quote`/`get_previous_close`) so
+  `WebSocketManager` can dispatch to either client symmetrically based on
+  `currency_for_ticker`, and so `on_quote` itself needs zero branching —
+  confirmed by reading it, it was already source-agnostic, only needing
+  one addition: attaching `currency=currency_for_ticker(ticker)` to the
+  outgoing `PriceUpdate`/`WatchlistPriceUpdate` payload so the frontend
+  never has to re-derive currency from a ticker string on data that
+  actually came over the wire (one source of truth for something that
+  affects money formatting). Structurally simpler than `AlpacaClient`:
+  no dedicated thread, since yfinance's calls are blocking REST (pushed
+  through `asyncio.to_thread`) with none of Alpaca's persistent-stream
+  cross-thread subscribe/deadlock risk. Polls all currently-tracked `.JK`
+  tickers in one batched `yf.download(...)` call per cycle (verified live
+  that this batches correctly for both one and many tickers — yfinance
+  groups by ticker in the response either way) rather than one HTTP call
+  per ticker, on a 20s interval — polite to an unofficial,
+  rate-limit-sensitive API regardless of portfolio size. Takes the last
+  two daily closes per ticker so one call covers both "current price"
+  and "previous close" (the change/change_pct baseline), mirroring
+  `AlpacaClient.get_previous_close`'s exact contract.
+
+- **The one deliberate exception to "currency always comes from the
+  backend":** a brand-new optimistic row (portfolio's `ADD_HOLDING`,
+  watchlist's `ADD_TICKER`) exists in frontend state for a moment before
+  any server response arrives at all — there's nothing from the wire to
+  take currency from yet. A small `currencyForTicker` mirror in
+  `lib/types.ts` fills exactly that gap, the same way `AddTickerForm.tsx`
+  already mirrors `TICKER_RE` for the identical optimistic-UI reason.
+  **Missed this initially for `ADD_HOLDING` specifically** (fixed it for
+  the watchlist reducer first, didn't carry the same fix to the
+  portfolio reducer) — caught live via Playwright: a freshly-added
+  BBCA.JK holding rendered its Avg Cost as `$6,000.00` instead of `Rp
+  6.000` until its first price tick arrived, because `formatCurrency`'s
+  `?? "USD"` fallback silently masked the missing field. Fixed by merging
+  `currency: currencyForTicker(...)` into the optimistic dispatch;
+  re-verified live afterward — correct immediately on add, not just
+  after the first tick.
+
+- **Verification:** `ruff`/`pytest` (28 tests, including new coverage for
+  `currency_for_ticker`, the relaxed `TICKER_RE`, and
+  `WebSocketManager`'s currency-based client routing/outgoing-currency-field
+  behavior) and `tsc`/`eslint`/production build, all clean. Live end to
+  end against a rebuilt Docker image during actual IDX trading hours
+  (confirmed via Jakarta time, ~15:27 WIB, within the 09:00–15:50 window):
+  added a real BBCA.JK holding through the running API, watched a real
+  `price_update` arrive over an authenticated WebSocket
+  (`price: 6275.0, currency: "IDR"`), then repeated the same add through
+  the actual browser UI via Playwright — screenshotted both the
+  immediate state (correct currency, no price yet) and the state after
+  waiting a full Yahoo poll cycle (correct price, correct Rp formatting,
+  correct sparkline, correct segregated USD/IDR totals in the header),
+  zero console/page errors either time. Test holdings and the analytics
+  snapshot key were cleaned up afterward — nothing test-only was left in
+  the running app's real state.
+
+- **Explicitly out of scope, noted plainly rather than silently
+  skipped:** no FX conversion (the user's decision); no Indonesian
+  news — Alpaca's news endpoint doesn't cover IDX tickers, so `.JK`
+  holdings simply produce no news items, a separate feature if ever
+  wanted; no generic multi-exchange framework — this is `.JK`-specific,
+  not a pluggable "add any exchange" system.

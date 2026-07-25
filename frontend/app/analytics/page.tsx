@@ -13,7 +13,7 @@ import {
 } from "recharts";
 
 import { authFetch, useRequireAuth } from "@/lib/auth";
-import type { AnalyticsResponse, PortfolioSnapshot } from "@/lib/types";
+import type { AnalyticsResponse, Currency, PortfolioSnapshot } from "@/lib/types";
 import { formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -34,6 +34,16 @@ function buildTickerSeries(history: PortfolioSnapshot[], ticker: string) {
   return history
     .filter((snapshot) => ticker in snapshot.holdings)
     .map((snapshot) => ({ timestamp: snapshot.timestamp, pnl_pct: snapshot.holdings[ticker].pnl_pct }));
+}
+
+// Same "only include snapshots that actually have this key" reasoning as
+// buildTickerSeries above, one level up: a currency with no holdings at
+// a given point in the window (e.g. before the first IDR holding was
+// added) simply has no entry in that snapshot's `totals`.
+function buildCurrencySeries(history: PortfolioSnapshot[], currency: string) {
+  return history
+    .filter((snapshot) => currency in snapshot.totals)
+    .map((snapshot) => ({ timestamp: snapshot.timestamp, total_pnl_pct: snapshot.totals[currency].total_pnl_pct }));
 }
 
 export default function AnalyticsPage() {
@@ -65,16 +75,20 @@ export default function AnalyticsPage() {
 
   if (!ready) return null;
 
-  const chartData = (data?.history ?? []).map((snapshot) => ({
-    timestamp: snapshot.timestamp,
-    total_pnl_pct: snapshot.total_pnl_pct,
-  }));
-
   // "Currently held" is defined by the latest snapshot, not "ever held
   // in this window" — consistent with the rest of the dashboard, which
   // only ever shows current holdings, not ones you've since sold.
   const latestSnapshot = data && data.history.length > 0 ? data.history[data.history.length - 1] : null;
   const currentTickers = latestSnapshot ? Object.keys(latestSnapshot.holdings).sort() : [];
+
+  // Segregated by currency, not summed into one number — same reasoning
+  // as the dashboard header (page.tsx): a $ total and an Rp total can't
+  // be added without an FX conversion this app deliberately doesn't do.
+  // USD listed first when present, same ordering convention as the
+  // dashboard.
+  const currencies = data
+    ? ["USD", ...Object.keys(data.totals).filter((c) => c !== "USD")].filter((c) => c in data.totals)
+    : [];
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -93,61 +107,98 @@ export default function AnalyticsPage() {
 
       {data && (
         <div className="space-y-8">
-          <section className="flex gap-8">
-            <div>
-              <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Return (since inception)</div>
-              <div
-                className={`text-xl font-semibold tabular-nums ${
-                  data.total_pnl >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
-                }`}
-              >
-                {data.history.length > 0
-                  ? `${formatSignedCurrency(data.total_pnl)} (${formatPercent(data.total_pnl_pct)})`
-                  : "—"}
+          <section className="flex flex-wrap gap-8">
+            {currencies.length === 0 ? (
+              <div>
+                <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Return (since inception)</div>
+                <div className="text-xl font-semibold tabular-nums">—</div>
               </div>
-            </div>
+            ) : (
+              currencies.map((currency) => {
+                const totals = data.totals[currency];
+                return (
+                  <div key={currency}>
+                    <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                      Total Return · {currency} (since inception)
+                    </div>
+                    <div
+                      className={`text-xl font-semibold tabular-nums ${
+                        totals.total_pnl >= 0
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : "text-red-600 dark:text-red-400"
+                      }`}
+                    >
+                      {formatSignedCurrency(totals.total_pnl, currency as Currency)} (
+                      {formatPercent(totals.total_pnl_pct)})
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </section>
 
           <section>
             <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">
               Daily P&amp;L History ({HISTORY_DAYS}d)
             </h2>
-            {chartData.length < 2 ? (
+            {currencies.length === 0 ? (
               <p className="text-sm text-neutral-500 dark:text-neutral-400">
                 Not enough history yet — snapshots are taken hourly, check back once a few have accumulated.
               </p>
             ) : (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-neutral-200 dark:stroke-neutral-800" />
-                    <XAxis
-                      dataKey="timestamp"
-                      tickFormatter={formatAxisDate}
-                      tick={{ fontSize: 12 }}
-                      stroke="currentColor"
-                      className="text-neutral-500 dark:text-neutral-400"
-                    />
-                    <YAxis
-                      tickFormatter={(value: number) => `${value.toFixed(1)}%`}
-                      tick={{ fontSize: 12 }}
-                      stroke="currentColor"
-                      className="text-neutral-500 dark:text-neutral-400"
-                    />
-                    <Tooltip
-                      formatter={(value) => [`${Number(value).toFixed(2)}%`, "Total P&L"]}
-                      labelFormatter={(label) => new Date(String(label)).toLocaleString()}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="total_pnl_pct"
-                      stroke="#10b981"
-                      strokeWidth={2}
-                      dot={false}
-                      isAnimationActive={false}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
+              <div className="space-y-6">
+                {currencies.map((currency) => {
+                  const series = buildCurrencySeries(data.history, currency);
+                  return (
+                    <div key={currency}>
+                      <div className="mb-2 text-xs font-medium text-neutral-600 dark:text-neutral-300">
+                        {currency}
+                      </div>
+                      {series.length < 2 ? (
+                        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                          Not enough history yet — snapshots are taken hourly, check back once a few have
+                          accumulated.
+                        </p>
+                      ) : (
+                        <div className="h-64">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={series}>
+                              <CartesianGrid
+                                strokeDasharray="3 3"
+                                className="stroke-neutral-200 dark:stroke-neutral-800"
+                              />
+                              <XAxis
+                                dataKey="timestamp"
+                                tickFormatter={formatAxisDate}
+                                tick={{ fontSize: 12 }}
+                                stroke="currentColor"
+                                className="text-neutral-500 dark:text-neutral-400"
+                              />
+                              <YAxis
+                                tickFormatter={(value: number) => `${value.toFixed(1)}%`}
+                                tick={{ fontSize: 12 }}
+                                stroke="currentColor"
+                                className="text-neutral-500 dark:text-neutral-400"
+                              />
+                              <Tooltip
+                                formatter={(value) => [`${Number(value).toFixed(2)}%`, "Total P&L"]}
+                                labelFormatter={(label) => new Date(String(label)).toLocaleString()}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="total_pnl_pct"
+                                stroke="#10b981"
+                                strokeWidth={2}
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>

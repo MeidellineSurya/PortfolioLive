@@ -6,7 +6,7 @@ import type { Holding } from "@/lib/types";
 // Mirrors backend/models.py's TICKER_RE — catching an obviously invalid
 // ticker here means the user sees why immediately, instead of waiting on
 // a round trip to the backend just to get the same rejection back.
-const TICKER_RE = /^[A-Z]{1,5}$/;
+const TICKER_RE = /^[A-Z]{1,5}(\.JK)?$/;
 
 type AddTickerFormProps = {
   onAdd: (holding: Holding) => void;
@@ -26,7 +26,7 @@ export default function AddTickerForm({ onAdd }: AddTickerFormProps) {
     const parsedAvgCost = Number(avgCost);
 
     if (!TICKER_RE.test(normalizedTicker)) {
-      setError("Ticker must be 1-5 letters (e.g. AAPL).");
+      setError("Ticker must be 1-5 letters (e.g. AAPL or BBCA.JK).");
       return;
     }
     if (!(parsedQuantity > 0) || !(parsedAvgCost > 0)) {
@@ -51,8 +51,8 @@ export default function AddTickerForm({ onAdd }: AddTickerFormProps) {
           id="add-ticker"
           value={ticker}
           onChange={(event) => setTicker(event.target.value.toUpperCase())}
-          placeholder="AAPL"
-          maxLength={5}
+          placeholder="AAPL or BBCA.JK"
+          maxLength={8}
           className="w-20 rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm uppercase dark:border-neutral-700"
         />
       </div>

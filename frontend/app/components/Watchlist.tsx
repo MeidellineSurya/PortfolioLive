@@ -7,7 +7,7 @@ import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/forma
 
 // Mirrors backend/models.py's TICKER_RE, same reasoning as AddTickerForm
 // (commit 9): catch an obviously invalid ticker before a round trip.
-const TICKER_RE = /^[A-Z]{1,5}$/;
+const TICKER_RE = /^[A-Z]{1,5}(\.JK)?$/;
 
 type WatchlistProps = {
   rows: WatchlistRow[];
@@ -23,7 +23,7 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
     event.preventDefault();
     const normalized = ticker.trim().toUpperCase();
     if (!TICKER_RE.test(normalized)) {
-      setError("Ticker must be 1-5 letters (e.g. TSLA).");
+      setError("Ticker must be 1-5 letters (e.g. TSLA or BBCA.JK).");
       return;
     }
     setError(null);
@@ -42,8 +42,8 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
             id="watch-ticker"
             value={ticker}
             onChange={(event) => setTicker(event.target.value.toUpperCase())}
-            placeholder="TSLA"
-            maxLength={5}
+            placeholder="TSLA or BBCA.JK"
+            maxLength={8}
             className="w-20 rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm uppercase dark:border-neutral-700"
           />
         </div>
@@ -74,6 +74,7 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
             <tbody>
               {rows.map((row) => {
                 const hasLiveData = row.price !== undefined;
+                const currency = row.currency ?? "USD";
                 const changePositive = (row.change ?? 0) >= 0;
                 const changeColor = hasLiveData
                   ? changePositive
@@ -83,12 +84,14 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
                 return (
                   <tr key={row.ticker} className="border-b border-neutral-100 last:border-0 dark:border-neutral-900">
                     <td className="py-2 pr-4 font-medium">{row.ticker}</td>
-                    <td className="py-2 pr-4 tabular-nums">{hasLiveData ? formatCurrency(row.price!) : "—"}</td>
+                    <td className="py-2 pr-4 tabular-nums">
+                      {hasLiveData ? formatCurrency(row.price!, currency) : "—"}
+                    </td>
                     <td className="py-2 pr-4">
                       <PriceSparkline prices={row.priceHistory ?? []} />
                     </td>
                     <td className={`py-2 pr-4 tabular-nums ${changeColor}`}>
-                      {row.change !== undefined ? formatSignedCurrency(row.change) : "—"}
+                      {row.change !== undefined ? formatSignedCurrency(row.change, currency) : "—"}
                     </td>
                     <td className={`py-2 pr-4 tabular-nums ${changeColor}`}>
                       {row.change_pct !== undefined ? formatPercent(row.change_pct) : "—"}

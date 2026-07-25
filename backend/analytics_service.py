@@ -15,7 +15,14 @@ from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as redis
 
-from models import AnalyticsResponse, HoldingSnapshot, PerformanceEntry, PortfolioSnapshot
+from models import (
+    AnalyticsResponse,
+    CurrencyTotals,
+    HoldingSnapshot,
+    PerformanceEntry,
+    PortfolioSnapshot,
+    currency_for_ticker,
+)
 from portfolio_store import PortfolioStore
 from websocket_manager import WebSocketManager
 
@@ -60,8 +67,11 @@ class AnalyticsService:
 
         last_prices = self._ws_manager.get_last_prices()
         holding_snapshots: dict[str, HoldingSnapshot] = {}
-        total_value = 0.0
-        total_cost_basis = 0.0
+        # Accumulated per currency, not into one pair of scalars — a $
+        # value and an Rp value can't be summed together without an FX
+        # conversion this app deliberately doesn't do (see DECISION_LOG).
+        value_by_currency: dict[str, float] = {}
+        cost_basis_by_currency: dict[str, float] = {}
 
         for holding in holdings:
             price = last_prices.get(holding.ticker)
@@ -78,20 +88,26 @@ class AnalyticsService:
             holding_snapshots[holding.ticker] = HoldingSnapshot(
                 price=price, value=round(value, 2), pnl_pct=round(pnl_pct, 4)
             )
-            total_value += value
-            total_cost_basis += cost_basis
+            currency = currency_for_ticker(holding.ticker)
+            value_by_currency[currency] = value_by_currency.get(currency, 0.0) + value
+            cost_basis_by_currency[currency] = cost_basis_by_currency.get(currency, 0.0) + cost_basis
 
         if not holding_snapshots:
             return None
 
-        total_pnl = total_value - total_cost_basis
-        total_pnl_pct = (total_pnl / total_cost_basis * 100) if total_cost_basis else 0.0
+        totals: dict[str, CurrencyTotals] = {}
+        for currency, value in value_by_currency.items():
+            cost_basis = cost_basis_by_currency[currency]
+            pnl = value - cost_basis
+            pnl_pct = (pnl / cost_basis * 100) if cost_basis else 0.0
+            totals[currency] = CurrencyTotals(
+                total_value=round(value, 2), total_pnl=round(pnl, 2), total_pnl_pct=round(pnl_pct, 4)
+            )
+
         now = datetime.now(timezone.utc)
         snapshot = PortfolioSnapshot(
             timestamp=now.isoformat(),
-            total_value=round(total_value, 2),
-            total_pnl=round(total_pnl, 2),
-            total_pnl_pct=round(total_pnl_pct, 4),
+            totals=totals,
             holdings=holding_snapshots,
         )
 
@@ -113,8 +129,7 @@ class AnalyticsService:
         best, worst = self._performance_window(perf_history)
 
         return AnalyticsResponse(
-            total_pnl=latest.total_pnl if latest else 0.0,
-            total_pnl_pct=latest.total_pnl_pct if latest else 0.0,
+            totals=latest.totals if latest else {},
             history=history,
             best_performer_7d=best,
             worst_performer_7d=worst,

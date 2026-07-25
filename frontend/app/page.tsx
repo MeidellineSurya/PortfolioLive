@@ -21,6 +21,7 @@ import type {
   WatchlistRow,
   WatchlistPriceUpdate,
 } from "@/lib/types";
+import { currencyForTicker } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -53,7 +54,21 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
       // semantics (main.py, commit 4): re-adding an existing ticker
       // updates its quantity/avg_cost rather than being rejected.
       const existing = state[action.holding.ticker];
-      return { ...state, [action.holding.ticker]: { ...existing, ...action.holding } };
+      // currency isn't part of Holding (POST's request body) — without
+      // this, a freshly-added row has no currency until its first
+      // PRICE_UPDATE tick arrives, and formatCurrency's `?? "USD"`
+      // fallback would render an IDX ticker's avg cost in dollars for
+      // however long that takes (up to 20s for a Yahoo-polled ticker,
+      // not near-instant like Alpaca's push). Same optimistic-placeholder
+      // reasoning as ADD_TICKER below.
+      return {
+        ...state,
+        [action.holding.ticker]: {
+          ...existing,
+          ...action.holding,
+          currency: currencyForTicker(action.holding.ticker),
+        },
+      };
     }
     case "REMOVE_HOLDING": {
       if (!(action.ticker in state)) return state;
@@ -104,7 +119,7 @@ function watchlistReducer(state: WatchlistState, action: WatchlistAction): Watch
       // entry's only identity is the ticker itself, which the client
       // already knows before the request completes.
       if (action.ticker in state) return state;
-      return { ...state, [action.ticker]: { ticker: action.ticker } };
+      return { ...state, [action.ticker]: { ticker: action.ticker, currency: currencyForTicker(action.ticker) } };
     }
     case "REMOVE_TICKER": {
       if (!(action.ticker in state)) return state;
@@ -311,10 +326,24 @@ export default function Home() {
 
   const rows = Object.values(portfolio).sort((a, b) => a.ticker.localeCompare(b.ticker));
   const watchlistRows = Object.values(watchlist).sort((a, b) => a.ticker.localeCompare(b.ticker));
-  const totalValue = rows.reduce((sum, row) => sum + (row.position_value ?? 0), 0);
-  const totalPnl = rows.reduce((sum, row) => sum + (row.position_pnl ?? 0), 0);
-  const totalCostBasis = rows.reduce((sum, row) => sum + row.avg_cost * row.quantity, 0);
-  const totalPnlPct = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
+
+  // Segregated by currency, not summed into one number — a $ total and
+  // an Rp total can't be added together without an FX conversion this
+  // app deliberately doesn't do (see DECISION_LOG). USD is listed first
+  // when present since it's the app's original/primary currency; any
+  // other currency present follows in whatever order it first appears.
+  const totalsByCurrency = new Map<string, { value: number; pnl: number; costBasis: number }>();
+  for (const row of rows) {
+    const currency = row.currency ?? "USD";
+    const bucket = totalsByCurrency.get(currency) ?? { value: 0, pnl: 0, costBasis: 0 };
+    bucket.value += row.position_value ?? 0;
+    bucket.pnl += row.position_pnl ?? 0;
+    bucket.costBasis += row.avg_cost * row.quantity;
+    totalsByCurrency.set(currency, bucket);
+  }
+  const currencyOrder = ["USD", ...[...totalsByCurrency.keys()].filter((c) => c !== "USD")].filter((c) =>
+    totalsByCurrency.has(c)
+  );
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -341,27 +370,40 @@ export default function Home() {
           </div>
         </div>
         <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-          15-minute delayed prices via Alpaca (IEX feed, free tier).
+          15-minute delayed prices via Alpaca (IEX feed, free tier); Indonesia (.JK) tickers via Yahoo Finance.
         </p>
-        <div className="mt-4 flex gap-8">
-          <div>
-            <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Value</div>
-            <div className="text-xl font-semibold tabular-nums">
-              {rows.length > 0 ? formatCurrency(totalValue) : "—"}
+        <div className="mt-4 flex flex-wrap gap-8">
+          {rows.length === 0 ? (
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Value</div>
+              <div className="text-xl font-semibold tabular-nums">—</div>
             </div>
-          </div>
-          <div>
-            <div className="text-xs text-neutral-500 dark:text-neutral-400">Total P&amp;L</div>
-            <div
-              className={`text-xl font-semibold tabular-nums ${
-                totalPnl >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
-              }`}
-            >
-              {rows.length > 0
-                ? `${formatSignedCurrency(totalPnl)} (${formatPercent(totalPnlPct)})`
-                : "—"}
-            </div>
-          </div>
+          ) : (
+            currencyOrder.map((currency) => {
+              const bucket = totalsByCurrency.get(currency)!;
+              const totalPnlPct = bucket.costBasis > 0 ? (bucket.pnl / bucket.costBasis) * 100 : 0;
+              return (
+                <div key={currency} className="flex gap-8">
+                  <div>
+                    <div className="text-xs text-neutral-500 dark:text-neutral-400">Total Value · {currency}</div>
+                    <div className="text-xl font-semibold tabular-nums">
+                      {formatCurrency(bucket.value, currency as "USD" | "IDR")}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-neutral-500 dark:text-neutral-400">Total P&amp;L · {currency}</div>
+                    <div
+                      className={`text-xl font-semibold tabular-nums ${
+                        bucket.pnl >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
+                      }`}
+                    >
+                      {formatSignedCurrency(bucket.pnl, currency as "USD" | "IDR")} ({formatPercent(totalPnlPct)})
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </header>
 

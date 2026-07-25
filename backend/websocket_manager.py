@@ -1,11 +1,14 @@
-"""Bridges Alpaca price ticks to connected frontend WebSocket clients.
+"""Bridges Alpaca/Yahoo price ticks to connected frontend WebSocket clients.
 
-Owns the one-Alpaca-connection-for-everyone invariant: individual tickers
-are subscribed/unsubscribed on the shared ``AlpacaClient`` as holdings or
-watchlist entries are added/removed, and every incoming quote is turned
-into either a P&L-aware ``PriceUpdate`` (portfolio holdings) or a
+Owns the one-connection-per-source-for-everyone invariant: individual
+tickers are subscribed/unsubscribed on whichever of the two shared price
+clients matches the ticker's currency (US via AlpacaClient, IDX via
+YahooClient — see models.currency_for_ticker) as holdings or watchlist
+entries are added/removed, and every incoming quote is turned into
+either a P&L-aware ``PriceUpdate`` (portfolio holdings) or a
 ``WatchlistPriceUpdate`` (watchlist-only tickers) broadcast to all
-connected frontend clients.
+connected frontend clients. ``on_quote`` itself is source-agnostic — it
+doesn't care which client called it, only which ticker/price it got.
 """
 from __future__ import annotations
 
@@ -17,9 +20,17 @@ from fastapi import WebSocket
 
 import metrics
 from alpaca_client import AlpacaClient
-from models import Holding, HoldingWithPrice, PriceUpdate, WatchlistItemWithPrice, WatchlistPriceUpdate
+from models import (
+    Holding,
+    HoldingWithPrice,
+    PriceUpdate,
+    WatchlistItemWithPrice,
+    WatchlistPriceUpdate,
+    currency_for_ticker,
+)
 from portfolio_store import PortfolioStore
 from watchlist_store import WatchlistStore
+from yahoo_client import YahooClient
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +57,14 @@ QuoteListener = Callable[[str, float, float], Awaitable[None]]
 
 class WebSocketManager:
     def __init__(
-        self, alpaca_client: AlpacaClient, portfolio_store: PortfolioStore, watchlist_store: WatchlistStore
+        self,
+        alpaca_client: AlpacaClient,
+        yahoo_client: YahooClient,
+        portfolio_store: PortfolioStore,
+        watchlist_store: WatchlistStore,
     ):
         self._alpaca = alpaca_client
+        self._yahoo = yahoo_client
         self._store = portfolio_store
         self._watchlist = watchlist_store
         self._clients: set[WebSocket] = set()
@@ -86,15 +102,17 @@ class WebSocketManager:
         """
         enriched = []
         for holding in holdings:
+            currency = currency_for_ticker(holding.ticker)
             price = self._last_prices.get(holding.ticker)
             if price is None:
-                enriched.append(HoldingWithPrice(**holding.model_dump()))
+                enriched.append(HoldingWithPrice(**holding.model_dump(), currency=currency))
                 continue
             position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
             enriched.append(
                 HoldingWithPrice(
                     **holding.model_dump(),
                     price=round(price, 4),
+                    currency=currency,
                     position_value=round(position_value, 2),
                     position_pnl=round(position_pnl, 2),
                     position_pnl_pct=round(position_pnl_pct, 4),
@@ -109,9 +127,10 @@ class WebSocketManager:
         """
         enriched = []
         for ticker in tickers:
+            currency = currency_for_ticker(ticker)
             price = self._last_prices.get(ticker)
             if price is None:
-                enriched.append(WatchlistItemWithPrice(ticker=ticker))
+                enriched.append(WatchlistItemWithPrice(ticker=ticker, currency=currency))
                 continue
             prev_close = self._prev_close.get(ticker, price)
             change, change_pct = self._change_math(prev_close, price)
@@ -119,6 +138,7 @@ class WebSocketManager:
                 WatchlistItemWithPrice(
                     ticker=ticker,
                     price=round(price, 4),
+                    currency=currency,
                     change=round(change, 4),
                     change_pct=round(change_pct, 4),
                 )
@@ -162,17 +182,21 @@ class WebSocketManager:
         for client in dead:
             self.disconnect(client)
 
-    # ---- portfolio <-> Alpaca subscription bridge -----------------------
+    # ---- portfolio <-> price-client subscription bridge ------------------
+
+    def _client_for(self, ticker: str) -> AlpacaClient | YahooClient:
+        return self._yahoo if currency_for_ticker(ticker) == "IDR" else self._alpaca
 
     async def track_ticker(self, ticker: str) -> None:
+        client = self._client_for(ticker)
         if ticker not in self._prev_close:
-            prev_close = await self._alpaca.get_previous_close(ticker)
+            prev_close = await client.get_previous_close(ticker)
             if prev_close is not None:
                 self._prev_close[ticker] = prev_close
-        await self._alpaca.subscribe_quote(ticker)
+        await client.subscribe_quote(ticker)
 
     async def untrack_ticker(self, ticker: str) -> None:
-        await self._alpaca.unsubscribe_quote(ticker)
+        await self._client_for(ticker).unsubscribe_quote(ticker)
         self._prev_close.pop(ticker, None)
 
     async def load_initial_holdings(self) -> None:
@@ -202,6 +226,7 @@ class WebSocketManager:
 
         prev_close = self._prev_close.get(ticker, price)
         change, change_pct = self._change_math(prev_close, price)
+        currency = currency_for_ticker(ticker)
 
         now = time.monotonic()
         last_broadcast = self._last_broadcast_at.get(ticker)
@@ -212,6 +237,7 @@ class WebSocketManager:
                 update = PriceUpdate(
                     ticker=ticker,
                     price=round(price, 4),
+                    currency=currency,
                     change=round(change, 4),
                     change_pct=round(change_pct, 4),
                     position_value=round(position_value, 2),
@@ -223,6 +249,7 @@ class WebSocketManager:
                 watch_update = WatchlistPriceUpdate(
                     ticker=ticker,
                     price=round(price, 4),
+                    currency=currency,
                     change=round(change, 4),
                     change_pct=round(change_pct, 4),
                 )
