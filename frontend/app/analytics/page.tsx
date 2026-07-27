@@ -92,7 +92,7 @@ export default function AnalyticsPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-y-2">
         <h1 className="text-2xl font-semibold">Analytics</h1>
         <Link href="/" className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300">
           ← Dashboard

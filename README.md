@@ -5,6 +5,8 @@ news, price alerts, a watchlist, and performance analytics — behind a
 single-user login, all on top of one shared WebSocket connection. Covers
 both US equities (Alpaca) and Indonesian stocks (Yahoo Finance, `.JK`
 tickers), with USD/IDR totals kept separate rather than FX-converted.
+Installable as a PWA, with a mobile card layout so it's usable from a
+phone, not just a desktop tab.
 
 ## Architecture
 
@@ -103,6 +105,11 @@ why the Docker `CMD` needs `exec`, and so on — is in
   equities — priced in IDR, polled from Yahoo Finance every 20s; Total
   Value/P&L and analytics are shown as separate USD and IDR totals, not
   FX-converted into one number
+- Installable PWA (manifest + icons + a minimal service worker for
+  Android/Chrome's install prompt; iOS uses Safari's manual "Add to
+  Home Screen") and a mobile card layout for the holdings/watchlist
+  tables below the `sm` breakpoint, instead of requiring horizontal
+  scroll to reach P&L/Alert/Remove
 
 ## Tech stack
 
@@ -135,16 +142,22 @@ backend/
   Dockerfile, railway.toml, .dockerignore
 frontend/
   app/
-    page.tsx              Dashboard: state, WebSocket wiring, layout
-    login/page.tsx        Login form
-    analytics/page.tsx    Portfolio analytics charts
+    page.tsx                        Dashboard: state, WebSocket wiring, layout
+    login/page.tsx                  Login form
+    analytics/page.tsx              Portfolio analytics charts
+    icon.png                        Favicon + PWA icon (Next.js App Router convention)
     components/
-      PortfolioTable.tsx  Holdings table with live P&L + sparklines
-      Watchlist.tsx       Watchlist table with live price + change
-      PriceSparkline.tsx  Mini Recharts line chart per holding
-      NewsFeed.tsx        AI news feed with ticker tabs + load more
-      AddTickerForm.tsx   Add-holding form (optimistic UI)
-      Toast.tsx           Alert-triggered toast notifications
+      PortfolioTable.tsx            Holdings table with live P&L + sparklines (+ mobile card view)
+      Watchlist.tsx                 Watchlist table with live price + change (+ mobile card view)
+      PriceSparkline.tsx            Mini Recharts line chart per holding
+      NewsFeed.tsx                  AI news feed with ticker tabs + load more
+      AddTickerForm.tsx             Add-holding form (optimistic UI)
+      Toast.tsx                     Alert-triggered toast notifications
+      ServiceWorkerRegistration.tsx Registers public/sw.js on mount
+  public/
+    manifest.json                   PWA manifest (name, icons, standalone display)
+    sw.js                           Minimal service worker — static assets only, never API/WS
+    icons/                          192/512/maskable/apple-touch-icon PNGs
   lib/
     websocket.ts  useWebSocket hook (auto-reconnect)
     auth.ts       authFetch wrapper + useRequireAuth login gate
@@ -245,6 +258,19 @@ instead — browsers can't set custom headers on a WS handshake).
 
 ## Known constraints
 
+- **Not deployed yet — runs locally only.** The PWA install prompt and
+  everything else work fine against `localhost` during development, but
+  installing it as a real home-screen app from a phone needs either an
+  actual deployment (Railway/Vercel, as the tech stack table names) or
+  the phone on the same LAN as the dev machine
+  (`next dev -H 0.0.0.0`) — neither has happened yet.
+- **The service worker (`public/sw.js`) only caches static assets, on
+  purpose.** It exists to satisfy Chrome/Android's install-prompt
+  criteria, not to enable offline use — it never touches `/portfolio`,
+  `/watchlist`, `/alerts`, `/analytics`, `/news/*`, or the WebSocket
+  connection. Offline just means the app shell loads and then shows
+  whatever `useWebSocket`'s disconnected/reconnecting state looks like,
+  not stale data presented as live.
 - **15-minute delayed data (US tickers).** Alpaca's free tier uses the
   IEX feed, not full SIP — fine for a dashboard, not for trading
   decisions.

@@ -2169,3 +2169,150 @@ an individual ticker's tab at all.
   confirmed the Load more button was nonetheless visible), clicked it,
   and confirmed real NVDA articles appeared — screenshotted before and
   after. Zero console/page errors.
+
+## Commit 30 — Fix: "Load more" items never showed under the "All" news tab
+
+**Files:** `frontend/app/components/NewsFeed.tsx`
+
+Immediate follow-up to commit 29: the user could now load more news per
+ticker, but those items never appeared when switching to "All."
+
+- **Root cause:** `filtered`'s ternary only merged `loadedMore` for the
+  currently-*selected* ticker:
+  ```tsx
+  const filtered = selectedTicker
+    ? [...items.filter((item) => item.ticker === selectedTicker), ...(loadedMore[selectedTicker] ?? [])]
+    : items;
+  ```
+  When `selectedTicker` is `null` ("All"), the `: items` branch ignores
+  `loadedMore` entirely, for every ticker — not a selected-ticker-only
+  gap, a total exclusion from the All view regardless of which ticker's
+  button was clicked.
+- **Fix:** the "All" branch now spreads every ticker's `loadedMore`
+  entries alongside the live `items`
+  (`[...items, ...Object.values(loadedMore).flat()]`). The existing
+  `seen` dedup (keyed by `ticker-url`, applied uniformly after
+  filtering) already covers any overlap between live and loaded items,
+  so no additional dedup logic was needed.
+- **Verification:** `tsc`/`eslint` clean. Playwright against the real
+  running app: loaded more news on the NVDA tab, confirmed real
+  articles appeared there, switched to "All," and confirmed those same
+  NVDA articles were present and "No news yet" was gone. Zero
+  console/page errors.
+- Environment note, not a code issue: the Playwright scratchpad's
+  `node_modules` had a corrupted `playwright` package (missing
+  `package.json`) left over from an earlier session — reinstalled
+  fresh, which also pulled a newer Playwright version requiring a
+  matching Chromium build (`npx playwright install chromium`). Worth
+  knowing if a future session hits the same `Cannot find module
+  'playwright'` error in this scratchpad path.
+
+## Commit 31 — Installable PWA + mobile card layout
+
+**Files:** `frontend/public/manifest.json` (new),
+`frontend/public/sw.js` (new), `frontend/public/icons/*.png` (new,
+generated), `frontend/app/icon.png` (new, replaces `app/favicon.ico`),
+`frontend/app/layout.tsx`,
+`frontend/app/components/ServiceWorkerRegistration.tsx` (new),
+`frontend/app/components/PortfolioTable.tsx`,
+`frontend/app/components/Watchlist.tsx`, `frontend/app/page.tsx`,
+`frontend/app/analytics/page.tsx`
+
+User wants this to become a daily-use app, checked from a phone. Two
+concrete gaps stood in the way, confirmed before writing any code: the
+app wasn't installable (`public/` was completely empty — no manifest,
+no icons, no service worker), and its two data tables were 10- and
+6-column HTML tables with zero responsive handling beyond
+`overflow-x-auto` — genuine horizontal scroll required on a 375px phone
+to reach P&L/Alert/Remove. Scoped deliberately to just these two
+things — actual deployment (Railway/Vercel) and push notifications were
+separate options in the same prioritization conversation the user
+didn't pick this round, so real on-device "Add to Home Screen" testing
+isn't possible yet; verified instead via Playwright's mobile viewport
+emulation plus manifest/icon reachability checks.
+
+- **Icons generated via Playwright screenshot, not an image library.**
+  A throwaway local HTML file with an inline SVG mark — dark `#171717`
+  background (the same color already used for primary buttons), a
+  simple emerald `#10b981` upward-trending line (the same color
+  `PriceSparkline.tsx` already uses as `POSITIVE_COLOR`) — screenshotted
+  at 192×192, 512×512, a separately-composed 512×512 maskable variant
+  (glyph scaled to ~62% and centered, keeping it inside the ~80%
+  safe-zone maskable icons require, full-bleed background with no
+  corner rounding since the OS applies its own mask shape), and 180×180
+  for `apple-touch-icon.png`. No new branding exercise — reusing colors
+  the app already established. `app/favicon.ico` (Next's untouched
+  default placeholder) was deleted in favor of `app/icon.png`, using
+  Next.js's App Router file convention instead of hand-building a valid
+  multi-resolution `.ico` without a proper encoder — confirmed via a
+  full production build that Next.js picks this up automatically as a
+  `/icon.png` route.
+
+- **Manifest's `theme_color` matches the page background
+  (`#ffffff`/`#0a0a0a`), not the button accent color.** The app has no
+  distinct colored header bar, so matching the actual background is
+  what makes the mobile status bar blend into the content instead of
+  showing a jarring different-colored strip at the top.
+  `layout.tsx`'s new `viewport` export sets `themeColor` as a
+  light/dark media-query pair (Next.js 15's Metadata API supports this
+  directly) rather than one static color, so it follows the same
+  `prefers-color-scheme` switch `globals.css` already drives everything
+  else with.
+
+- **Hand-rolled service worker, not `next-pwa`/`@ducanh2912/next-pwa`.**
+  Deliberately avoided adding a dependency for something this small, and
+  more importantly avoided those plugins' default aggressive
+  API-response caching — actively wrong for a WebSocket-driven live-data
+  app. `public/sw.js` registers a bare `fetch` listener (the actual
+  Chrome/Android installability requirement) plus light cache-first
+  handling of same-origin static assets only
+  (`/_next/static/*`, `/icons/*`); every other request — every REST
+  call to the backend (a different origin in both dev and the intended
+  Railway/Vercel deploy split), every WebSocket upgrade, every
+  navigation — hits an early return with no `respondWith()` call at
+  all, so the browser handles it exactly as if no service worker were
+  installed. iOS Safari needs no service worker at all for "Add to Home
+  Screen" (manual Share-sheet action, no automatic install prompt) —
+  this part exists purely for Android/Chrome's automatic install
+  banner. Registered from a new tiny client component
+  (`ServiceWorkerRegistration.tsx`, returns `null`) mounted in the root
+  layout, rather than converting the whole (currently server) layout to
+  a client component for one `useEffect`.
+
+- **Mobile card fallback, not a responsive table.** In both
+  `PortfolioTable.tsx` and `Watchlist.tsx`: the existing `<table>` is
+  now wrapped `hidden sm:block`, with a new sibling `sm:hidden` card
+  list rendering the exact same row data through the exact same
+  handlers. Not one shared markup toggling between a `<tr>` and a card
+  `<div>` — a `<tbody>` can only contain `<tr>` children, so the two
+  views are structurally separate blocks, not a single conditional
+  render. `PortfolioTable.tsx`'s new `PortfolioRowCard` keeps its own
+  copy of the small `addingAlert`/`targetPrice` alert-form state rather
+  than sharing it with `PortfolioRowView`: both are mounted
+  simultaneously (CSS `hidden`/`block` per breakpoint, not conditional
+  rendering), so sharing state would mean the table row's and the
+  card's alert forms fighting over one shared "is the form open" flag.
+  Cards surface what's actually glanced at first — ticker, current
+  price, P&L $ and % combined into one line — with qty/avg cost, the
+  sparkline, and alert/remove controls below, rather than trying to
+  cram all ten table columns into a narrower layout.
+
+- **Header wrap fix**: `page.tsx`'s and `analytics/page.tsx`'s header
+  rows (title + nav links) gained `flex-wrap gap-y-2` — `page.tsx`'s
+  three-element header (title, Analytics link, Log out) was the
+  tightest case on the narrowest phones.
+
+- **Verification:** `tsc`/`eslint`/production build clean (also
+  confirmed `/icon.png` appears as a real route in the build output).
+  Playwright, against the real running app: confirmed all seven new
+  static assets (`manifest.json`, four icon files, `icon.png`, `sw.js`)
+  return 200 and the manifest parses as valid JSON; at a 375×667
+  viewport, confirmed `document.body.scrollWidth` exactly matches the
+  viewport width (zero horizontal overflow) on both the dashboard and
+  analytics pages, confirmed the `<table>` is genuinely hidden and the
+  card list renders in its place, confirmed the service worker reaches
+  `activated` state with zero console/page errors; at a 1280×800
+  desktop viewport, confirmed the table view is unchanged and still
+  visible, zero errors. Real on-device "Add to Home Screen" install
+  testing needs either deployment or same-LAN access — neither is part
+  of this round, noted explicitly rather than silently left unverified.

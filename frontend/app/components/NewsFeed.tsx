@@ -29,7 +29,7 @@ export default function NewsFeed({ items, tickers }: NewsFeedProps) {
 
   const filtered = selectedTicker
     ? [...items.filter((item) => item.ticker === selectedTicker), ...(loadedMore[selectedTicker] ?? [])]
-    : items;
+    : [...items, ...Object.values(loadedMore).flat()];
 
   // A load-more page can overlap with a live item that arrived in
   // between (both sides guard against re-sending the same article, but

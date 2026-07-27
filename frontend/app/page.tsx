@@ -348,7 +348,7 @@ export default function Home() {
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <header className="mb-8">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-y-2">
           <h1 className="text-2xl font-semibold">PortfolioLive</h1>
           <div className="flex items-center gap-4">
             <Link
