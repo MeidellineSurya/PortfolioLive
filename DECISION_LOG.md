@@ -2316,3 +2316,239 @@ emulation plus manifest/icon reachability checks.
   visible, zero errors. Real on-device "Add to Home Screen" install
   testing needs either deployment or same-LAN access — neither is part
   of this round, noted explicitly rather than silently left unverified.
+
+## Commit 32 — Deployed to production (no application code changed)
+
+**Files:** `README.md` only — this entry documents infrastructure
+decisions with no corresponding code diff, an exception to "per commit"
+worth recording anyway since none of this is otherwise written down
+anywhere.
+
+User wants the app "always accessible," not just runnable locally. The
+original spec's stated deploy target was Railway (backend) + Vercel
+(frontend) — README already said so. That assumption turned out to be
+wrong by the time this happened.
+
+- **Railway's free tier no longer supports this.** Checked before
+  spending anything: Railway's genuinely-free tier is a one-time $5
+  trial credit, then $1/month after — nowhere near enough to run a
+  backend *and* Redis continuously; it would run out within days.
+  Checked the obvious alternatives too: Render's free tier sleeps after
+  15 minutes of inactivity and kills open WebSocket connections on
+  sleep (fundamentally incompatible with this app), and Fly.io removed
+  its free tier entirely in 2024. None of the mainstream PaaS options
+  have a real always-on free tier anymore.
+- **Landed on a Google Cloud e2-micro VM** (part of GCP's actually-
+  permanent "Always Free" allowance — confirmed, not assumed: no
+  auto-charge ever happens without an explicit manual "upgrade to
+  paid" click, and Always Free resources stay $0 indefinitely as long
+  as usage stays within their limits) plus Vercel for the frontend
+  (genuinely free for personal projects, no caveat). `backend/
+  railway.toml` is left in place as a documented alternative, not
+  deleted — it's inert and costs nothing to keep.
+- **Real gotcha: the account's existing billing account showed
+  `OPEN: false`.** Signup wasn't actually complete despite appearing
+  so — required the user to go finish card verification in the
+  console before any resource (even free-tier) could be created.
+  Confirmed this specific failure mode via `gcloud billing accounts
+  list` before assuming anything was provisionable.
+- **e2-micro specifically, `us-central1-a`, `pd-standard` disk.** Only
+  three regions (`us-west1`/`us-central1`/`us-east1`) and only the
+  `pd-standard` disk type are Always-Free-eligible — an SSD disk or any
+  other region would have started billing immediately. A static
+  external IP was reserved (also free, but only while attached to a
+  running instance) so the domain/cert setup below wouldn't break on
+  every VM restart.
+- **Almost shipped a 176MB `.venv` to a `scp --recurse backend`
+  copy.** `.dockerignore` exists precisely for this and has zero
+  bearing on a raw `scp`, which doesn't know about it. Caught because
+  the transfer kept timing out; fixed by tar-ing a clean copy
+  (excluding `.venv`, caches, `tests/`, and `.env` — secrets are set
+  via `docker run -e` from the values already in the local `.env`,
+  never copied as a file) down to 28KB. The Docker image itself is
+  built directly on the VM from that tarball, not pushed from a
+  registry — simplest option for a single VM with nothing else
+  consuming it.
+- **Backend and Redis both run with `--network host`.** Docker
+  Desktop's `host.docker.internal` (used throughout local dev on
+  macOS) doesn't exist on plain Linux without an explicit
+  `--add-host` flag; host networking sidesteps needing it entirely —
+  the backend container reaches Redis via a plain `127.0.0.1:6379`,
+  identical code path to how it'd resolve on the host itself.
+- **Rotated the login password before calling this "done," not
+  after.** The container's first run reused the session's local
+  dev/test password out of habit — caught before treating the
+  deployment as complete, since this backend is now genuinely
+  internet-reachable. `AUTH_USERNAME`/`AUTH_PASSWORD` only bootstrap
+  once (idempotent by design, documented in `auth.py`), so simply
+  restarting with a new `AUTH_PASSWORD` value wouldn't have changed
+  anything — had to explicitly delete the already-bootstrapped
+  `auth:username`/`auth:password_hash` Redis keys first to force a
+  genuine re-bootstrap with a freshly-generated strong password.
+- **Mixed-content blocking forced a real TLS certificate, not a
+  workaround.** Vercel serves the frontend over HTTPS; browsers
+  refuse HTTPS pages calling plain-HTTP endpoints outright — confirmed
+  live via a real browser console error before assuming a cause. No
+  purchased domain exists, and Let's Encrypt can't issue a cert for a
+  bare IP address. Used `nip.io` (free wildcard DNS —
+  `<ip-with-dashes>.nip.io` resolves to that literal IP, verified via
+  `dig` before relying on it) to get a real, resolvable hostname
+  pointing at the VM, paired with Caddy as a reverse proxy in front of
+  the backend — Caddy auto-provisions and renews the Let's Encrypt
+  cert with no manual certbot/renewal-cron setup, and proxies the
+  WebSocket upgrade transparently with zero extra configuration
+  (confirmed live: `wss://` connects successfully through it).
+- **One real, durable limitation this creates**: the HTTPS cert and
+  every frontend env var pointing at the backend are keyed to this
+  VM's specific IP via nip.io, not a real domain — if the VM is ever
+  recreated, all of it needs updating together. Documented plainly in
+  the README rather than left as a silent trap for later.
+
+**Verification:** confirmed the backend's public IP answers `/health`
+and `/auth/login` directly over both plain HTTP (pre-Caddy) and HTTPS
+(post-Caddy) before touching the frontend at all. After pointing
+Vercel's `NEXT_PUBLIC_API_URL`/`NEXT_PUBLIC_WS_URL` at the HTTPS
+backend and redeploying, verified via Playwright against the actual
+live production URLs (not localhost): full login flow succeeds, zero
+console/page errors, the WebSocket genuinely opens over `wss://`
+(watched a real `[websocket]` event fire, not just assumed from no
+errors), and all PWA assets (`manifest.json`, icons, `sw.js`) return
+200 from the real domain. Real on-device "Add to Home Screen" install
+is now actually testable, unlike the LAN-only workaround from the
+previous commit.
+
+## Commit 33 — Push notifications, app icon badge, and a daily digest
+
+**Files:** `backend/push_store.py`, `backend/push_service.py`,
+`backend/digest_service.py` (new), `backend/alert_service.py`,
+`backend/main.py`, `backend/models.py`, `backend/websocket_manager.py`,
+`backend/requirements.txt`, `backend/tests/test_push_service.py`,
+`backend/tests/test_digest_service.py` (new),
+`frontend/public/sw.js`, `frontend/lib/push.ts` (new),
+`frontend/app/components/NotificationToggle.tsx` (new),
+`frontend/app/page.tsx`, `README.md`
+
+Closes the gap flagged in the very first "make this daily-use" planning
+conversation: alerts only ever reached you if the tab happened to be
+open. The service worker built for PWA installability (commit 31) was
+the missing prerequisite for real Web Push — this was the natural next
+step once that existed.
+
+- **VAPID keys generated in the exact raw format `pywebpush` actually
+  wants, confirmed by reading its source first, not guessed.**
+  `pywebpush.webpush`'s `vapid_private_key: str` path falls through to
+  `py_vapid.Vapid.from_string`, which auto-detects a 32-byte raw
+  base64url-encoded key — no PEM wrapping needed, simpler than the
+  PEM-based approach tried first and discarded. Round-tripped the
+  generated key through `Vapid02.from_string` before ever using it for
+  real, to catch a format mismatch immediately rather than at first
+  send. Public key ships to the frontend as
+  `NEXT_PUBLIC_VAPID_PUBLIC_KEY` (not secret — it's meant to be public,
+  same as any VAPID public key); `PushService` silently no-ops (logged
+  once) if the keys aren't configured, so local dev never needs real
+  push credentials just to run the app.
+
+- **`push_store.py` uses a Redis hash keyed by endpoint, not a plain
+  set like `watchlist_store.py`'s pattern it otherwise mirrors.** A
+  subscription carries more than its own identity — the p256dh/auth
+  encryption keys the browser generated alongside it — and dead
+  subscriptions need to be removed by endpoint specifically (see
+  below), which a flat set of opaque JSON blobs can't do.
+
+- **Push send is decoupled from the hot path, deliberately.**
+  `AlertService.check_and_trigger` runs on every live quote tick; a
+  slow or unreachable push endpoint must never delay processing the
+  next one. `asyncio.create_task(...)` fires the send without
+  awaiting it — with its own reference kept in a
+  `_pending_push_tasks` set (asyncio's own docs warn a task with no
+  live reference can be garbage-collected mid-execution; the set
+  exists purely to prevent that, self-discarding via a done callback).
+  `PushService.notify_all` itself never raises — each subscription's
+  send is caught independently, so one dead endpoint can't stop
+  delivery to the others.
+
+- **Expired subscriptions get cleaned up automatically.** A 404/410
+  from the push service (surfaced by `pywebpush` as
+  `WebPushException.response.status_code`) means the browser's own
+  push service confirms that subscription no longer exists —
+  uninstalled, permission revoked, etc. — so it's removed rather than
+  retried forever on every future alert or digest.
+
+- **App icon badge counts fired-but-undeleted alerts, not toast
+  state.** Considered tying it to the existing toast stack first —
+  rejected after checking `Toast.tsx`: toasts auto-dismiss after 6
+  seconds, so a badge driven by that state would already read zero by
+  the time anyone actually glances at a home-screen icon later,
+  defeating the entire point of a badge. Reusing `alerts.filter(a =>
+  a.triggered).length` against state `page.tsx` already fetches means
+  no backend change was needed, and deleting a fired alert (an
+  affordance that already existed) now doubles as clearing it from the
+  badge — not a new "acknowledge" concept bolted on. The Badging API
+  has no Safari/iOS support; this is stated plainly rather than
+  promised for a platform it doesn't work on.
+
+- **Daily digest reuses the push channel, not email.** Standing up a
+  transactional email service/account for one feature would have been
+  a disproportionate amount of new infrastructure for "one message a
+  day." Content is deliberately price-moves-only: `WebSocketManager`
+  gained a `get_prev_close()` getter (symmetric with the existing
+  `get_last_prices()`) so the digest derives "today's move" from the
+  exact same baseline every live tick's `change`/`change_pct` already
+  uses — no separate computation. News headlines were considered and
+  explicitly left out: Alpaca/Yahoo news broadcasts are ephemeral
+  (`news_service.py` only keeps a dedup id set, no durable "what
+  happened today" log), so including them would mean building new
+  persistent news-history storage — a real feature on its own, not a
+  natural extension of what already exists. Scheduling mirrors every
+  other background loop in this codebase exactly (sleep until next
+  scheduled time, fire, repeat, whole body wrapped in try/except) —
+  `_seconds_until_next_run` computes the gap fresh each cycle rather
+  than a fixed interval, so a mid-cycle restart doesn't wait a full
+  extra day. Defaults to 07:00 WIB (`DIGEST_HOUR_UTC=0`); worth
+  correcting later if this turns out to be a bad time in practice, not
+  something to guess more precisely now.
+
+- **`digest_service.py` initially reached into
+  `WebSocketManager._change_math`, an underscore-prefixed "private"
+  static method, from another module — caught during implementation,
+  not shipped.** Fixed by inlining the two-line formula instead of
+  reaching across a privacy boundary just because Python doesn't
+  enforce one.
+
+- **Verification hit a real environment wall, root-caused rather than
+  worked around blindly**: Playwright's default `chromium.launch()` +
+  `newContext()` produces an incognito-style context, and Chrome
+  deliberately does not support the Push API there at all (confirmed
+  via the exact console error, not assumed) — `chromium.launchPersistentContext`
+  with a real Google Chrome channel (confirmed installed on this
+  machine) was required for a genuine subscribe to succeed. A second,
+  narrower wall: the real subscribe/store/send pipeline worked in
+  *headless* real Chrome (confirmed via backend logs — `POST
+  /push/subscribe` returned 201, `pywebpush.webpush()` completed
+  without raising), but the actual push never reached the service
+  worker's `push` event in headless mode specifically. Switching to
+  `headless: false` fixed it — this appears to be a genuine limitation
+  of headless Chrome's background push delivery, not an app bug,
+  though it means true end-to-end delivery can currently only be
+  verified with a visible browser window available.
+- **Full round trip confirmed live, twice** — once against the local
+  Docker backend, once against the actual production deployment (GCP
+  VM + Vercel): real subscribe through the real UI, a real stored
+  subscription (confirmed via Redis), a real VAPID-signed send
+  triggered directly against that subscription, delivered through
+  Google's real push infrastructure, observed as a real `push` event
+  in the real service worker via a spy installed with
+  `serviceWorker.evaluate` — with the exact title/body sent coming
+  back out the other end. `ruff`/`pytest` (56 tests, including new
+  coverage for `PushService`'s send/cleanup logic and
+  `DigestService`'s move computation and formatting) and
+  `tsc`/`eslint`/build all clean throughout. Test subscriptions and
+  alerts cleaned up from both Redis instances afterward — nothing
+  test-only left in either environment's real state.
+- Both live deployments updated as part of this, not just documented:
+  the GCP VM's backend container restarted with the new VAPID/digest
+  env vars (redeployed via a plain shell script over SCP, not another
+  inline SSH one-liner — an earlier attempt with the docker run
+  command embedded directly in the SSH `--command` string silently
+  failed on nested quoting and left the container not running at all
+  until caught), Vercel's env vars updated and redeployed.

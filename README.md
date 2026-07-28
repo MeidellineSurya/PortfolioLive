@@ -110,6 +110,14 @@ why the Docker `CMD` needs `exec`, and so on — is in
   Home Screen") and a mobile card layout for the holdings/watchlist
   tables below the `sm` breakpoint, instead of requiring horizontal
   scroll to reach P&L/Alert/Remove
+- Real push notifications (Web Push/VAPID) when a price alert fires —
+  arrives even with the app closed, opt-in via a header toggle. Chrome/
+  Edge (desktop + Android) only; no Safari/iOS support for the Push API
+- An app icon badge showing the number of fired-but-not-yet-cleared
+  alerts (Badging API — Chrome/Edge desktop + Android only, no Safari/
+  iOS support)
+- A daily digest push (default 07:00 WIB, `DIGEST_HOUR_UTC`) summarising
+  today's price move per tracked ticker
 
 ## Tech stack
 
@@ -119,7 +127,7 @@ why the Docker `CMD` needs `exec`, and so on — is in
 | Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS, Recharts |
 | AI | Groq (`llama-3.3-70b-versatile`) for one-line news summaries |
 | Data | Alpaca Markets (free tier — 15-minute delayed IEX feed, US equities); Yahoo Finance (unofficial, `.JK` Indonesia tickers, via [`yfinance`](https://github.com/ranaroussi/yfinance)) |
-| Deploy | Railway (backend, via Docker), Vercel (frontend) |
+| Deploy | Backend: a free-tier Google Cloud e2-micro VM, running the same Docker image as local dev, with [Caddy](https://caddyserver.com) reverse-proxying HTTPS (auto-provisioned Let's Encrypt cert via [nip.io](https://nip.io), since there's no purchased domain). Frontend: Vercel. `backend/railway.toml` is kept for Railway as an alternative, but its free tier ($1/month credit after a one-time trial) isn't enough to run a backend + Redis continuously — see commit 32. |
 
 ## Project structure
 
@@ -133,12 +141,15 @@ backend/
   portfolio_store.py      Redis-backed holdings CRUD
   watchlist_store.py      Redis-backed watched-ticker CRUD
   alert_store.py          Redis-backed price alert CRUD
-  alert_service.py        Threshold-crossing detection on live ticks
+  alert_service.py        Threshold-crossing detection on live ticks + push
   analytics_service.py    Hourly portfolio snapshots + P&L history/analytics
   auth.py                 Single-user JWT auth (bootstrap, login, verify)
   metrics.py              Prometheus counters/gauges (shared registry)
   models.py               Pydantic models shared across the backend
-  tests/                  pytest — models, auth, alerts, WebSocket fan-out
+  push_store.py           Redis-backed Web Push subscription storage
+  push_service.py         VAPID-signed push sending (pywebpush) + cleanup
+  digest_service.py       Daily price-move push, same scheduled-loop shape as news polling
+  tests/                  pytest — models, auth, alerts, push, digest, WebSocket fan-out
   Dockerfile, railway.toml, .dockerignore
 frontend/
   app/
@@ -154,13 +165,15 @@ frontend/
       AddTickerForm.tsx             Add-holding form (optimistic UI)
       Toast.tsx                     Alert-triggered toast notifications
       ServiceWorkerRegistration.tsx Registers public/sw.js on mount
+      NotificationToggle.tsx        Push notification opt-in/out toggle
   public/
     manifest.json                   PWA manifest (name, icons, standalone display)
-    sw.js                           Minimal service worker — static assets only, never API/WS
+    sw.js                           Service worker — static-asset cache + push/notificationclick, never API/WS
     icons/                          192/512/maskable/apple-touch-icon PNGs
   lib/
     websocket.ts  useWebSocket hook (auto-reconnect)
     auth.ts       authFetch wrapper + useRequireAuth login gate
+    push.ts       Web Push subscribe/unsubscribe (PushManager, VAPID key conversion)
     types.ts      Shared TypeScript types (mirrors backend/models.py)
     format.ts     Currency / percent / relative-time formatting
 .github/workflows/ci.yml  Lint + test on every PR (backend + frontend)
@@ -254,23 +267,37 @@ instead — browsers can't set custom headers on a WS handshake).
 | `POST` | `/alerts` | Create an alert (`{ticker, target_price}`) — ticker must be a holding or watched |
 | `DELETE` | `/alerts/{alert_id}` | Remove an alert |
 | `GET` | `/analytics?days=` | Total return, P&L history, best/worst performer (7d) |
+| `POST` | `/push/subscribe` | Register a browser's Web Push subscription (`{endpoint, keys: {p256dh, auth}}`) |
+| `DELETE` | `/push/subscribe?endpoint=` | Remove a Web Push subscription |
 | `WS` | `/ws?token=` | Live `price_update` / `watchlist_price_update` / `news_update` / `price_alert` events |
 
 ## Known constraints
 
-- **Not deployed yet — runs locally only.** The PWA install prompt and
-  everything else work fine against `localhost` during development, but
-  installing it as a real home-screen app from a phone needs either an
-  actual deployment (Railway/Vercel, as the tech stack table names) or
-  the phone on the same LAN as the dev machine
-  (`next dev -H 0.0.0.0`) — neither has happened yet.
-- **The service worker (`public/sw.js`) only caches static assets, on
-  purpose.** It exists to satisfy Chrome/Android's install-prompt
-  criteria, not to enable offline use — it never touches `/portfolio`,
-  `/watchlist`, `/alerts`, `/analytics`, `/news/*`, or the WebSocket
-  connection. Offline just means the app shell loads and then shows
-  whatever `useWebSocket`'s disconnected/reconnecting state looks like,
-  not stale data presented as live.
+- **The backend's HTTPS cert is tied to its IP via nip.io, not a real
+  domain.** If the VM is ever recreated (a new external IP), the
+  Caddyfile's hostname and every `NEXT_PUBLIC_API_URL`/
+  `NEXT_PUBLIC_WS_URL` reference need updating together — there's no
+  DNS indirection cushioning that today. A real domain would remove
+  this coupling if the project outgrows the free-tier setup.
+- **The service worker (`public/sw.js`) only *caches* static assets, on
+  purpose** — it also now handles `push`/`notificationclick` events
+  (unrelated to caching), but its `fetch` handler still never touches
+  `/portfolio`, `/watchlist`, `/alerts`, `/analytics`, `/news/*`, or the
+  WebSocket connection. Offline just means the app shell loads and then
+  shows whatever `useWebSocket`'s disconnected/reconnecting state looks
+  like, not stale data presented as live.
+- **Push notifications and the app icon badge have no Safari/iOS
+  support** — both are real platform gaps (the Push API and Badging
+  API respectively), not bugs. They work on Chrome/Edge, desktop and
+  Android.
+- **True end-to-end push delivery could only be verified with a visible
+  (non-headless) browser window in this environment** — headless real
+  Chrome successfully subscribed and the backend successfully sent (no
+  errors, real HTTP 2xx from the push service), but the push never
+  reached the service worker's `push` event specifically in headless
+  mode. Appears to be a Chrome headless-mode limitation around
+  background push delivery, not an application bug — worth knowing if
+  push notifications are ever automated-tested again.
 - **15-minute delayed data (US tickers).** Alpaca's free tier uses the
   IEX feed, not full SIP — fine for a dashboard, not for trading
   decisions.

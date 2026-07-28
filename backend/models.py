@@ -201,3 +201,18 @@ class WatchlistPriceUpdate(BaseModel):
     currency: Literal["USD", "IDR"]
     change: float
     change_pct: float
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscriptionCreate(BaseModel):
+    """The shape a browser's PushSubscription.toJSON() produces (minus
+    expirationTime, which pywebpush never needs) — the request body for
+    POST /push/subscribe.
+    """
+
+    endpoint: str
+    keys: PushSubscriptionKeys

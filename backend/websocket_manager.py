@@ -89,6 +89,15 @@ class WebSocketManager:
     def get_last_prices(self) -> dict[str, float]:
         return dict(self._last_prices)
 
+    def get_prev_close(self) -> dict[str, float]:
+        """Exposed for DigestService — the same per-ticker baseline
+        already used to compute the change/change_pct fields on every
+        live quote update, so "today's move" for the digest is
+        derived from the exact same reference point the rest of the
+        app already shows, not recomputed independently.
+        """
+        return dict(self._prev_close)
+
     def enrich_holdings(self, holdings: list[Holding]) -> list[HoldingWithPrice]:
         """Attaches last-known price/value/P&L to each holding, for
         GET /portfolio. Without this, a freshly-loaded page (or a page

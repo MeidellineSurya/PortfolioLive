@@ -5,6 +5,7 @@ import { useEffect, useReducer, useState } from "react";
 
 import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
+import NotificationToggle from "./components/NotificationToggle";
 import PortfolioTable from "./components/PortfolioTable";
 import ToastStack, { type ToastMessage } from "./components/Toast";
 import WatchlistSection from "./components/Watchlist";
@@ -215,6 +216,21 @@ export default function Home() {
     };
   }, []);
 
+  // App icon badge (Chrome/Edge desktop + Android only — the Badging
+  // API has no Safari/iOS support). Count = fired-but-not-yet-deleted
+  // alerts, reusing the delete button that already exists in the alert
+  // UI rather than inventing a separate "acknowledge" concept — removing
+  // a fired alert already doubles as clearing it from the badge.
+  useEffect(() => {
+    if (!("setAppBadge" in navigator)) return;
+    const triggeredCount = alerts.filter((alert) => alert.triggered).length;
+    if (triggeredCount > 0) {
+      navigator.setAppBadge(triggeredCount).catch(() => {});
+    } else {
+      navigator.clearAppBadge().catch(() => {});
+    }
+  }, [alerts]);
+
   useEffect(() => {
     if (!lastMessage) return;
     if (lastMessage.type === "price_update") {
@@ -351,6 +367,7 @@ export default function Home() {
         <div className="flex flex-wrap items-center justify-between gap-y-2">
           <h1 className="text-2xl font-semibold">PortfolioLive</h1>
           <div className="flex items-center gap-4">
+            <NotificationToggle />
             <Link
               href="/analytics"
               className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300"

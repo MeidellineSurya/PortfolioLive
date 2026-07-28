@@ -8,19 +8,27 @@ would re-fire on every subsequent tick instead of once).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from alert_store import AlertStore
 from models import PriceAlert, PriceAlertTriggered
+from push_service import PushService
 from websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
 
 
 class AlertService:
-    def __init__(self, alert_store: AlertStore, ws_manager: WebSocketManager):
+    def __init__(self, alert_store: AlertStore, ws_manager: WebSocketManager, push_service: PushService):
         self._store = alert_store
         self._ws_manager = ws_manager
+        self._push_service = push_service
+        # asyncio's own docs warn that a task with no live reference can
+        # be garbage-collected mid-execution — this set exists purely to
+        # hold one until it's done, then self-discards via the done
+        # callback. Not a task registry for any other purpose.
+        self._pending_push_tasks: set[asyncio.Task] = set()
 
     async def create_alert(self, ticker: str, target_price: float) -> PriceAlert:
         return await self._store.create_alert(ticker, target_price)
@@ -66,6 +74,21 @@ class AlertService:
                 direction=direction,
             )
             await self._ws_manager.broadcast(triggered.model_dump())
+            # Fire-and-forget: this runs on the same hot path as every
+            # live quote tick (check_and_trigger is a WebSocketManager
+            # quote listener), so a slow or unreachable push endpoint
+            # must never delay processing the next tick. PushService
+            # itself never raises — a task exception here would only
+            # ever come from something unexpected, not a normal push
+            # failure, so it's left unhandled rather than swallowed.
+            task = asyncio.create_task(
+                self._push_service.notify_all(
+                    title=f"{ticker} crossed {direction} {alert.target_price:g}",
+                    body=f"Now at {price:g}",
+                )
+            )
+            self._pending_push_tasks.add(task)
+            task.add_done_callback(self._pending_push_tasks.discard)
 
     @staticmethod
     def _crossed(previous_price: float, price: float, target: float) -> str | None:

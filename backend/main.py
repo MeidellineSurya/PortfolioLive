@@ -26,6 +26,7 @@ from alert_store import AlertStore
 from alpaca_client import AlpacaClient
 from analytics_service import AnalyticsService
 from auth import AuthService
+from digest_service import DigestService
 from models import (
     TICKER_RE,
     AnalyticsResponse,
@@ -36,12 +37,15 @@ from models import (
     NewsItem,
     PriceAlert,
     PriceAlertCreate,
+    PushSubscriptionCreate,
     WatchlistAdd,
     WatchlistItem,
     WatchlistItemWithPrice,
 )
 from news_service import NewsService
 from portfolio_store import PortfolioStore
+from push_service import PushService
+from push_store import PushStore
 from watchlist_store import WatchlistStore
 from websocket_manager import WebSocketManager
 from yahoo_client import YahooClient
@@ -110,9 +114,21 @@ async def lifespan(app: FastAPI):
         redis_url=os.environ["REDIS_URL"],
     )
     alert_store = AlertStore(os.environ["REDIS_URL"])
-    alert_service = AlertService(alert_store, manager)
+    push_store = PushStore(os.environ["REDIS_URL"])
+    # No VAPID keys configured means PushService silently no-ops (logged
+    # once) rather than every local dev setup needing real push
+    # credentials just to run the app — see push_service.py.
+    push_service = PushService(
+        push_store,
+        vapid_public_key=os.environ.get("VAPID_PUBLIC_KEY"),
+        vapid_private_key=os.environ.get("VAPID_PRIVATE_KEY"),
+        vapid_claims_email=os.environ.get("VAPID_CLAIMS_EMAIL"),
+    )
+    alert_service = AlertService(alert_store, manager, push_service)
     analytics_service = AnalyticsService(store, manager, os.environ["REDIS_URL"])
     auth_service = AuthService(os.environ["REDIS_URL"], os.environ["AUTH_SECRET_KEY"])
+    digest_hour_utc = int(os.environ.get("DIGEST_HOUR_UTC", "0"))
+    digest_service = DigestService(store, watchlist_store, manager, push_service, digest_hour_utc)
 
     # Threshold-crossing checks piggyback on every quote tick via the
     # same loosely-coupled listener hook WebSocketManager exposes for
@@ -129,6 +145,8 @@ async def lifespan(app: FastAPI):
     app.state.alert_service = alert_service
     app.state.analytics_service = analytics_service
     app.state.auth_service = auth_service
+    app.state.push_store = push_store
+    app.state.digest_service = digest_service
 
     alpaca_client.start()
     yahoo_client.start()
@@ -138,6 +156,7 @@ async def lifespan(app: FastAPI):
         await manager.load_initial_watchlist()
         news_service.start()
         analytics_service.start()
+        digest_service.start()
         yield
     finally:
         # Alpaca allows exactly one active stream connection per account —
@@ -148,9 +167,11 @@ async def lifespan(app: FastAPI):
         await alpaca_client.stop()
         await yahoo_client.stop()
         await news_service.stop()
+        await digest_service.stop()
         await store.close()
         await watchlist_store.close()
         await alert_store.close()
+        await push_store.close()
         await auth_service.close()
 
 
@@ -335,6 +356,18 @@ async def get_analytics(days: int = 30) -> AnalyticsResponse:
     days = max(1, min(days, 90))
     analytics_service: AnalyticsService = app.state.analytics_service
     return await analytics_service.get_analytics(days)
+
+
+@protected.post("/push/subscribe", status_code=201, response_model=None)
+async def subscribe_to_push(subscription: PushSubscriptionCreate) -> None:
+    push_store: PushStore = app.state.push_store
+    await push_store.add_subscription(subscription.endpoint, subscription.keys.model_dump())
+
+
+@protected.delete("/push/subscribe", status_code=204, response_model=None)
+async def unsubscribe_from_push(endpoint: str) -> None:
+    push_store: PushStore = app.state.push_store
+    await push_store.remove_subscription(endpoint)
 
 
 app.include_router(protected)
