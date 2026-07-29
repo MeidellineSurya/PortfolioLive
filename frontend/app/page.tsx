@@ -367,7 +367,7 @@ export default function Home() {
         <div className="flex flex-wrap items-center justify-between gap-y-2">
           <h1 className="text-2xl font-semibold">PortfolioLive</h1>
           <div className="flex items-center gap-4">
-            <NotificationToggle />
+            <NotificationToggle onNotify={(text) => setToasts((prev) => [...prev, { id: crypto.randomUUID(), text }])} />
             <Link
               href="/analytics"
               className="text-sm font-medium text-neutral-600 hover:underline dark:text-neutral-300"

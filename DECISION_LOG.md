@@ -2552,3 +2552,47 @@ step once that existed.
   command embedded directly in the SSH `--command` string silently
   failed on nested quoting and left the container not running at all
   until caught), Vercel's env vars updated and redeployed.
+
+## Commit 34 — Fix: no feedback when enabling push notifications
+
+**Files:** `frontend/lib/push.ts`, `frontend/app/components/NotificationToggle.tsx`,
+`frontend/app/page.tsx`
+
+User-reported: clicking "Enable notifications" gave no indication of
+whether it worked. Checked the live backend directly
+(`HLEN push:subscriptions` over SSH) and confirmed zero subscriptions
+existed — the flow wasn't silently succeeding with just a missed visual
+cue, it was never completing at all.
+
+- **Two separate bugs, not one.** First: `subscribeToPush()` returned a
+  plain `boolean`, and its caller never did anything with a `false`
+  beyond leaving the button unchanged — no toast, no message, nothing
+  distinguishing "you denied the permission prompt" from "the server
+  rejected it" from any other failure. Second, found *while fixing the
+  first*: `registration.pushManager.subscribe(...)` had no try/catch
+  around it at all. Confirmed live via Playwright (a Chromium context
+  that, like incognito, doesn't support the Push API) that this throws
+  a real exception — `"Registration failed - permission denied"` — that
+  bypassed every one of the new result values entirely, an uncaught
+  rejection with no path back to the UI. The first fix alone would have
+  silently done nothing in exactly this case.
+- **Fix:** `subscribeToPush()` now returns a discriminated
+  `SubscribeResult` (`{ok: true}` or `{ok: false, reason: "unsupported"
+  | "not-configured" | "permission-denied" | "server-error" |
+  "browser-error"}`) instead of a boolean, with the whole subscribe
+  attempt wrapped in try/catch so a thrown exception becomes
+  `"browser-error"` rather than an unhandled rejection.
+  `NotificationToggle` now takes an `onNotify` callback and pushes a
+  specific message through the app's existing toast system
+  (`ToastStack`/`page.tsx`'s `toasts` state — the same mechanism price
+  alerts already use) for every outcome, success included: previously
+  the *only* success feedback was the button's own label quietly
+  changing to "Notifications on ✓," easy to miss in a small header
+  button.
+- **Verification:** `tsc`/`eslint` clean. Playwright against the real
+  local app confirmed the exact failure path this bug report traced
+  back to: clicking the button in a Push-API-unsupported context now
+  shows a real toast ("Your browser couldn't complete the
+  subscription…") instead of nothing, and the button correctly stays
+  "Enable notifications" rather than falsely flipping to subscribed.
+  Deployed to Vercel production and confirmed live.
