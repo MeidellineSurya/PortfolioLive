@@ -2596,3 +2596,55 @@ cue, it was never completing at all.
   subscription…") instead of nothing, and the button correctly stays
   "Enable notifications" rather than falsely flipping to subscribed.
   Deployed to Vercel production and confirmed live.
+
+## Commit 35 — Fix: alert creation silently failing; runaway Alpaca reconnect loop pegging the VM
+
+**Files:** `frontend/app/page.tsx`, `backend/alpaca_client.py`
+
+User-reported twice: "entered the number and clicked enter and yet
+nothing," then, after a first round of fixes, "but i still cant make an
+alert." The second report meant the problem wasn't actually resolved —
+required going back in rather than assuming the earlier fix covered it.
+
+- **UI-layer bug, same class as Commit 34's push fix:**
+  `handleSetAlert` had `if (!res.ok) return;` — a failed `POST /alerts`
+  looked identical to success from the user's side, since
+  `PortfolioTable`'s `handleSubmitAlert` clears/closes the input
+  unconditionally without waiting to find out. Fixed the same way:
+  surfaces the backend's `detail` (or a generic message) through the
+  existing toast stack.
+- **The real, live root cause — found by re-checking the VM directly
+  rather than trusting the earlier fix:** `GET/POST /alerts` timed out
+  completely against the live backend, while `/health` still returned
+  200 — the same "some endpoints hang, others don't" signature as the
+  earlier snapd outage. `uptime` showed load average 1.9 on the
+  e2-micro's single vCPU; `docker logs` showed `alpaca_client` retrying
+  a failed websocket connection (`ValueError: connection limit
+  exceeded`) roughly every 130ms, forever. Traced into alpaca-py's own
+  `DataStream._run_forever`: its `except ValueError` branch only
+  `return`s for "insufficient subscription" — every other `ValueError`,
+  including this one, just logs and loops back to the top with zero
+  delay. Our own outer reconnect loop (`_run_stream_with_backoff`,
+  already correctly exponential) never gets a chance to apply its
+  backoff, because `stream.run()` never returns while alpaca-py is
+  looping internally like this. Root condition: an unclean prior
+  restart left a stale session holding Alpaca's single-connection
+  -per-key slot, so every fresh attempt kept getting rejected — and the
+  zero-delay retry burned the one CPU busy-checking that slot instead
+  of leaving room for real HTTP request handling.
+- **Fix:** rather than fork or vendor alpaca-py, monkeypatched the one
+  call `_run_forever` makes that can fail —
+  `DataStream._start_ws` — to sleep for `RECONNECT_BASE_DELAY_SECONDS`
+  before re-raising. A persistent failure now degrades to ~1
+  attempt/second instead of ~10/second, leaving the CPU free.
+- **Verification:** confirmed live — `docker logs` after redeploy shows
+  no repeated "connection limit exceeded" spam and normal poll-cycle
+  logging resumed; `uptime` load average dropped from 1.9 to 0.48.
+  `POST /alerts` against the live backend returned 201 immediately.
+  Redeployed by tar-ing `backend/` (excluding `.venv`) to the VM,
+  `docker build`-ing a fresh image, and swapping the running container
+  with the same env vars/`--network host`/`--restart unless-stopped`
+  flags — test alerts cleaned up afterward, the user's real triggered
+  TLKM.JK alert left untouched. `ruff`/`tsc` clean. Committed and
+  pushed; Vercel picks up the `page.tsx` change automatically on push
+  to `main`.
