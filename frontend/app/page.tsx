@@ -312,7 +312,25 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticker, target_price: targetPrice }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        // A silent `return` here used to mean a failed alert looked
+        // identical to a successful one from the user's side — the
+        // input just closes either way (PortfolioTable's
+        // handleSubmitAlert doesn't wait to find out). Surface *why*
+        // rather than nothing: the backend sends a real reason (e.g.
+        // "not in your portfolio or watchlist") as JSON on a 4xx, worth
+        // showing over a generic failure message when it's there.
+        let detail = `Couldn't set an alert for ${ticker}.`;
+        try {
+          const body: { detail?: string } = await res.json();
+          if (body.detail) detail = body.detail;
+        } catch {
+          // Response wasn't JSON (e.g. a 502 from an infrastructure
+          // problem, not the app itself) — the generic message stands.
+        }
+        setToasts((prev) => [...prev, { id: crypto.randomUUID(), text: detail }]);
+        return;
+      }
       const alert: PriceAlert = await res.json();
       // Not optimistic like handleAdd/handleRemove: the backend generates
       // the alert's id (a uuid4), so there's nothing valid to render
@@ -320,7 +338,12 @@ export default function Home() {
       // need a fake id that then has to be reconciled with the real one.
       setAlerts((prev) => [...prev, alert]);
     } catch {
-      // Nothing was added to local state, so nothing to roll back.
+      // fetch itself threw — the backend was unreachable (e.g. down or
+      // between deploys), not just an application-level rejection.
+      setToasts((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), text: `Couldn't reach the server to set an alert for ${ticker}.` },
+      ]);
     }
   }
 

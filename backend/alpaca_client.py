@@ -36,6 +36,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.live.stock import StockDataStream
+from alpaca.data.live.websocket import DataStream
 from alpaca.data.models.news import News
 from alpaca.data.models.quotes import Quote
 from alpaca.data.requests import NewsRequest, StockSnapshotRequest
@@ -46,6 +47,32 @@ NEWS_POLL_INTERVAL_SECONDS = 60
 NEWS_FETCH_LIMIT = 50
 RECONNECT_BASE_DELAY_SECONDS = 1
 RECONNECT_MAX_DELAY_SECONDS = 30
+
+# alpaca-py's own reconnect loop (``DataStream._run_forever``) retries a
+# failed ``_start_ws()`` immediately with zero delay for any error other
+# than "insufficient subscription" (its ``except ValueError`` branch just
+# logs and loops back to the top). Observed live: after an unclean restart
+# left a stale session holding Alpaca's single-connection-per-key slot,
+# this busy-looped retrying roughly every 130ms, pegging the VM's one vCPU
+# and starving real HTTP request handling (including alert creation)
+# until the container was manually restarted. There's no hook to add
+# backoff from outside ``_run_forever`` itself, so the one call it makes
+# that can fail is patched here to sleep before re-raising — a persistent
+# failure then degrades to ~1 attempt/second instead of ~10/second,
+# leaving the CPU free for everything else while it waits out the stale
+# session.
+_original_start_ws = DataStream._start_ws
+
+
+async def _start_ws_with_backoff(self: DataStream) -> None:
+    try:
+        await _original_start_ws(self)
+    except Exception:
+        await asyncio.sleep(RECONNECT_BASE_DELAY_SECONDS)
+        raise
+
+
+DataStream._start_ws = _start_ws_with_backoff
 
 OnQuote = Callable[[str, float], Awaitable[None]]
 OnNewsBatch = Callable[["list[NewsArticle]"], Awaitable[None]]
