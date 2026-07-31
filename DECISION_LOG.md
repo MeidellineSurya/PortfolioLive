@@ -2701,3 +2701,46 @@ knows their last close.
   restart served real prices for every holding, including the
   currently-closed IDX ones, instead of the blanks this exact scenario
   produced before the fix.
+
+## Infra — Vercel was never connected to GitHub
+
+User reported the market-status badge (Commit 36) "isn't there" after
+being told it was live. Checked production directly: `curl -sI` on the
+live URL showed `age: 142145` (~39.5 hours) with `x-vercel-cache: HIT`,
+and `_next/static` chunks fetched from prod contained no trace of the
+badge's "Market open" string at all — the deployed build genuinely
+predated every fix from this session, not a caching illusion.
+
+- **Root cause:** `vercel project inspect` showed no connected Git
+  repository at all — this Vercel project had only ever been deployed
+  via manual `vercel --prod` CLI runs (the most recent one 2 days old),
+  never via GitHub. Every "Vercel picks up the change automatically on
+  push to main" claim made earlier in this session (Commits 34–36) was
+  wrong — asserted without verification, not actually true for this
+  project. `frontend/.vercel/project.json`'s stored `projectId`/`orgId`
+  plus a cached CLI auth token (`~/Library/Application Support/
+  com.vercel.cli/auth.json`, from an earlier `vercel login`) made it
+  possible to install the CLI locally (global install failed on
+  `EACCES`) and inspect/fix this directly rather than asking the user
+  to go through the dashboard.
+- **Fix, in order:** (1) `vercel --prod` once to get every pending fix
+  live immediately — confirmed by re-fetching prod and finding the
+  badge string in the new chunk hash. (2) `vercel git connect
+  <repo-url>` to wire up the GitHub integration (run from `frontend/`
+  with the URL passed explicitly — the bare `vercel git connect` with
+  no URL failed with "No local Git repository found" despite a real
+  repo existing one level up). (3) The CLI has no flag for it, so
+  `rootDirectory` was set to `frontend` via a direct `PATCH
+  /v9/projects/{id}` call to Vercel's REST API using the same cached
+  token — required because the project was created by deploying from
+  inside `frontend/` directly (root directory `.`), but GitHub
+  integration checks out the whole monorepo and needs to be told where
+  the Next.js app actually lives.
+- **Verification:** an empty verification commit was pushed
+  (`57667fb`), then confirmed — not assumed — via a direct call to
+  Vercel's own `GET /v6/deployments` API rather than trusting the CLI's
+  human-readable list (which doesn't show git source at all): the
+  newest deployment has `source: "git"` and
+  `meta.githubCommitSha`/`githubCommitMessage` matching that exact
+  commit. Future pushes to `main` now genuinely auto-deploy; this
+  should not recur.
