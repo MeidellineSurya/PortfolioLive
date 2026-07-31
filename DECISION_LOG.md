@@ -2648,3 +2648,56 @@ required going back in rather than assuming the earlier fix covered it.
   TLKM.JK alert left untouched. `ruff`/`tsc` clean. Committed and
   pushed; Vercel picks up the `page.tsx` change automatically on push
   to `main`.
+
+## Commit 36 — Feature: market open/closed indicator; keep last known price instead of blank
+
+**Files:** `frontend/lib/marketHours.ts`, `frontend/app/components/MarketStatusBadge.tsx`,
+`frontend/app/components/PortfolioTable.tsx`, `frontend/app/components/Watchlist.tsx`,
+`backend/websocket_manager.py`
+
+User asked how the app behaves when the US or Indonesian market is
+closed, after which two gaps were confirmed by reading the code: no
+visual cue anywhere that a price is stale because its market is
+closed, and (worse, and freshly re-confirmed live by Commit 35's
+outage) a process restart landing during closed hours serves *blank*
+rows for tickers it hasn't ticked yet this run, even when it already
+knows their last close.
+
+- **Market status indicator:** a small dot next to each ticker
+  (portfolio + watchlist, desktop table and mobile card, both already-
+  duplicated markups) — green when that ticker's market is open, gray
+  when closed, with a `title`/`aria-label` for the exact state.
+  Computed entirely client-side (`lib/marketHours.ts`) against a fixed
+  NYSE (09:30–16:00 America/New_York) and IDX (two sessions with a
+  midday break, Asia/Jakarta — Friday's break runs longer) schedule
+  keyed off the row's existing `currency` field — no new backend
+  endpoint needed, since currency was already sent on every
+  price-bearing payload. Deliberately not sourced from a live exchange
+  calendar: no holiday feed is wired up for either market, so a market
+  holiday shows "open" when it's actually closed — documented plainly
+  in the module rather than presented as authoritative. Refreshed on a
+  60s timer (`MarketStatusBadge.tsx`) so a tab left open across an
+  open/close boundary doesn't show a stale dot indefinitely — nothing
+  else forces a re-render while the market's closed and no ticks are
+  arriving.
+- **Backend fallback:** `enrich_holdings`/`enrich_watchlist`
+  (`websocket_manager.py`) only ever read `_last_prices`, populated
+  exclusively by live ticks — empty for every ticker right after this
+  process (re)starts, even though `_prev_close` was already fetched for
+  every tracked ticker at startup (`track_ticker`) and is a perfectly
+  good last-known price in its own right. Both now fall back to
+  `_prev_close` before giving up, so a restart during closed hours
+  never blanks out rows that were already showing real numbers before
+  it — `change`/`change_pct` correctly come out as 0/0% in that case,
+  since there's nothing more recent than the close to compare against.
+- **Verification:** `ruff`/`pytest` (46 tests) and `tsc`/`eslint`/
+  `next build` all clean. Visually confirmed via Playwright against the
+  real app with mocked `/portfolio`/`/watchlist` responses (one USD,
+  one IDR ticker) and the page clock pinned to a known NYSE-open/
+  IDX-closed instant — green dot on the US ticker, gray on the IDX one,
+  correct layout on both the table and card markup. Redeployed the
+  same way as Commit 35 (tar → `docker build` → container swap);
+  confirmed live afterward that `GET /portfolio` immediately after the
+  restart served real prices for every holding, including the
+  currently-closed IDX ones, instead of the blanks this exact scenario
+  produced before the fix.
