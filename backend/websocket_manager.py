@@ -108,11 +108,23 @@ class WebSocketManager:
         Holdings with no known price (just added, or never ticked this
         process's lifetime) get `None` fields, same as a row that hasn't
         received its first WebSocket tick yet.
+
+        `_last_prices` only gets populated by a live tick, so it's empty
+        for every ticker right after this process (re)starts — a restart
+        that happens to land while the market's closed (e.g. the VM
+        recovering from an outage overnight) would otherwise show blank
+        rows until the next open, even though `_prev_close` was already
+        fetched for every tracked ticker at startup (`track_ticker`,
+        below) and is a perfectly good "last known price" in its own
+        right. Falling back to it here means a restart never blanks out
+        rows that were already showing real numbers before it.
         """
         enriched = []
         for holding in holdings:
             currency = currency_for_ticker(holding.ticker)
             price = self._last_prices.get(holding.ticker)
+            if price is None:
+                price = self._prev_close.get(holding.ticker)
             if price is None:
                 enriched.append(HoldingWithPrice(**holding.model_dump(), currency=currency))
                 continue
@@ -133,11 +145,16 @@ class WebSocketManager:
         """GET /watchlist's equivalent of enrich_holdings — same "show the
         last-known price on load instead of blank" reasoning, just with no
         P&L fields to compute (a watchlist ticker has no quantity/avg_cost).
+        Falls back to `_prev_close` for the same reason as enrich_holdings;
+        `change`/`change_pct` correctly come out as 0/0% in that case
+        (there's nothing more recent than the close to compare it to).
         """
         enriched = []
         for ticker in tickers:
             currency = currency_for_ticker(ticker)
             price = self._last_prices.get(ticker)
+            if price is None:
+                price = self._prev_close.get(ticker)
             if price is None:
                 enriched.append(WatchlistItemWithPrice(ticker=ticker, currency=currency))
                 continue

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import MarketStatusBadge from "./MarketStatusBadge";
 import PriceSparkline from "./PriceSparkline";
 import type { PortfolioRow, PriceAlert } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
@@ -107,7 +108,12 @@ function PortfolioRowView({
 
   return (
     <tr className="border-b border-neutral-100 last:border-0 dark:border-neutral-900">
-      <td className="py-2 pr-4 font-medium">{row.ticker}</td>
+      <td className="py-2 pr-4 font-medium">
+        <span className="inline-flex items-center gap-1.5">
+          {row.ticker}
+          <MarketStatusBadge currency={currency} />
+        </span>
+      </td>
       <td className="py-2 pr-4 tabular-nums">{row.quantity}</td>
       <td className="py-2 pr-4 tabular-nums">{formatCurrency(row.avg_cost, currency)}</td>
       <td className="py-2 pr-4 tabular-nums">
@@ -245,7 +251,10 @@ function PortfolioRowCard({
     <div className="rounded-lg border border-neutral-200 p-3 dark:border-neutral-800">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="font-medium">{row.ticker}</div>
+          <div className="inline-flex items-center gap-1.5 font-medium">
+            {row.ticker}
+            <MarketStatusBadge currency={currency} />
+          </div>
           <div className="text-xs text-neutral-500 dark:text-neutral-400">
             {row.quantity} sh · {formatCurrency(row.avg_cost, currency)} avg
           </div>

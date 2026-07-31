@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import MarketStatusBadge from "./MarketStatusBadge";
 import PriceSparkline from "./PriceSparkline";
 import type { WatchlistRow } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
@@ -90,7 +91,12 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
                       key={row.ticker}
                       className="border-b border-neutral-100 last:border-0 dark:border-neutral-900"
                     >
-                      <td className="py-2 pr-4 font-medium">{row.ticker}</td>
+                      <td className="py-2 pr-4 font-medium">
+                        <span className="inline-flex items-center gap-1.5">
+                          {row.ticker}
+                          <MarketStatusBadge currency={currency} />
+                        </span>
+                      </td>
                       <td className="py-2 pr-4 tabular-nums">
                         {hasLiveData ? formatCurrency(row.price!, currency) : "—"}
                       </td>
@@ -144,7 +150,10 @@ function WatchlistRowCard({ row, onRemove }: { row: WatchlistRow; onRemove: (tic
   return (
     <div className="rounded-lg border border-neutral-200 p-3 dark:border-neutral-800">
       <div className="flex items-start justify-between gap-2">
-        <div className="font-medium">{row.ticker}</div>
+        <div className="inline-flex items-center gap-1.5 font-medium">
+          {row.ticker}
+          <MarketStatusBadge currency={currency} />
+        </div>
         <div className="text-right">
           <div className="tabular-nums font-medium">{hasLiveData ? formatCurrency(row.price!, currency) : "—"}</div>
           <div className={`text-xs tabular-nums ${changeColor}`}>
