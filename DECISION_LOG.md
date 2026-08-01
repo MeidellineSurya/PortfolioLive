@@ -2744,3 +2744,66 @@ predated every fix from this session, not a caching illusion.
   `meta.githubCommitSha`/`githubCommitMessage` matching that exact
   commit. Future pushes to `main` now genuinely auto-deploy; this
   should not recur.
+
+## Commit 37 — Fix: file-descriptor exhaustion from a per-call yfinance session leak
+
+**Files:** `backend/yahoo_client.py`, `backend/tests/test_yahoo_client.py`
+
+User reported "Couldn't reach the server" from the deployed app. This
+was a new, previously-unseen outage — distinct from all three earlier
+infra root causes this session (snapd crash-loop, zero swap, the
+Alpaca reconnect busy-loop).
+
+- **Diagnosis, in order:** external `curl` on `/health` and
+  `/auth/login` returned 502; `docker ps` showed both containers
+  healthy and "Up 27 hours" with normal memory/CPU (ruling out the
+  three known prior causes at a glance); a direct `curl` to
+  `127.0.0.1:8000/health` *from inside the VM, bypassing Caddy*
+  returned nothing at all (connection refused), proving Caddy itself
+  was fine and correctly proxying — the backend process was alive
+  (`docker inspect` showed `Status: running`, `RestartCount: 0`) but
+  had stopped accepting any new connections. `docker logs` showed the
+  actual cause repeating every 20 seconds: `yfinance: OperationalError
+  (unable to open database file)` for the IDX tickers, escalating to
+  `OSError: [Errno 24] Too many open files` on outbound Alpaca news
+  requests too — a process-wide file-descriptor exhaustion, not
+  anything specific to sqlite.
+- **Root cause:** `yf.download()` and `yf.Ticker()` both create a
+  brand-new HTTP session internally whenever no `session=` kwarg is
+  passed (confirmed by reading yfinance 1.5.2's own source,
+  `multi.py`/`_http.py`) — and `yahoo_client.py` never passed one.
+  Every 20-second price-poll cycle (`_fetch_recent_closes`) and every
+  ticker in every news fetch (`fetch_news`, one `yf.Ticker(...)` per
+  ticker) spun up a fresh session whose underlying socket only got
+  closed whenever Python's garbage collector happened to reclaim the
+  object — evidently not fast enough in a long-running asyncio
+  process, since it took a slow, steady ~27 hours to exhaust the
+  container's file descriptor limit (Docker's default 1024) from
+  ordinary polling volume alone.
+- **Fix:** one shared session (`yfinance._http.new_session()` — the
+  same helper `yf.download`/`yf.Ticker` use internally by default,
+  needed rather than a plain `requests.Session()` because yfinance
+  prefers `curl_cffi` for browser TLS impersonation to avoid Yahoo
+  rate-limiting/blocking) is created once in `YahooClient.__init__`
+  and passed to every `yf.download(..., session=self._session)` and
+  `yf.Ticker(ticker, session=self._session)` call — same
+  create-once-reuse pattern `AlpacaClient` already uses for its
+  `NewsClient`/`StockHistoricalDataClient`. `_fetch_recent_closes`
+  moved from `@staticmethod` to a regular instance method to reach
+  `self._session` (call sites unchanged — `self._fetch_recent_closes`
+  was already how both callers invoked it).
+- **Mitigation layered on top, not instead of the fix:** the
+  container's open-file ulimit was also raised from Docker's default
+  1024 to 65536 (`--ulimit nofile=65536:65536` on `docker run`) — even
+  with the leak fixed, a much higher ceiling means any *other* leak
+  that turns up later degrades far more slowly, converting a hard
+  failure into more runway to notice and fix it, the same reasoning
+  already applied to adding swap earlier this session.
+- **Verification:** `ruff`/`pytest` (46 tests — one test's `fake_ticker`
+  mock needed a `session=None` param added to match the new call
+  signature) all clean. Redeployed (tar → `docker build` → container
+  swap, this time including the new ulimit flag); confirmed live
+  afterward: `docker exec ... ulimit -n` reports 65536, startup logs
+  show a clean Alpaca stream connect and normal Yahoo/Alpaca news poll
+  cycles with no repeated errors, and both the VM-local and external
+  `/health` checks return 200.
