@@ -22,6 +22,7 @@ import asyncio
 import logging
 
 import yfinance as yf
+from yfinance._http import new_session
 
 from alpaca_client import NewsArticle, OnQuote
 
@@ -37,6 +38,18 @@ class YahooClient:
         self._subscribed: set[str] = set()
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # yfinance creates a brand-new HTTP session internally whenever no
+        # `session=` is passed to `yf.download`/`yf.Ticker` — meaning every
+        # 20-second poll cycle, and every ticker in every news fetch, opened
+        # a fresh session (and its underlying socket) that only got closed
+        # whenever the garbage collector got around to it. Confirmed live as
+        # the cause of a real outage: this process ran for ~27 hours before
+        # exhausting its file descriptor limit ("Too many open files"),
+        # taking down the whole backend even though nothing had crashed.
+        # One shared, reused session for the process's lifetime fixes the
+        # leak at the source, same as AlpacaClient reusing a single
+        # NewsClient/StockHistoricalDataClient instead of one per call.
+        self._session = new_session()
         # Alpaca's push feed only ever fires on a genuine quote change —
         # when the market's closed, it sends nothing at all. This poll
         # loop runs on a fixed timer regardless of market state, so
@@ -126,7 +139,9 @@ class YahooClient:
         articles: list[NewsArticle] = []
         for ticker in tickers:
             try:
-                raw_items = await asyncio.to_thread(yf.Ticker(ticker).get_news, count=limit)
+                raw_items = await asyncio.to_thread(
+                    yf.Ticker(ticker, session=self._session).get_news, count=limit
+                )
             except Exception:
                 logger.exception("Yahoo news fetch failed for %s", ticker)
                 continue
@@ -159,8 +174,7 @@ class YahooClient:
             logger.warning("skipping malformed Yahoo news article for %s", ticker)
             return None
 
-    @staticmethod
-    def _fetch_recent_closes(tickers: list[str]) -> dict[str, list[float]]:
+    def _fetch_recent_closes(self, tickers: list[str]) -> dict[str, list[float]]:
         """One batched HTTP round trip covering every tracked ticker, not
         one call each — polite to an unofficial, rate-limit-sensitive API
         regardless of how many IDX tickers are tracked (verified live:
@@ -179,6 +193,7 @@ class YahooClient:
             group_by="ticker",
             progress=False,
             threads=True,
+            session=self._session,
         )
         result: dict[str, list[float]] = {}
         for ticker in tickers:

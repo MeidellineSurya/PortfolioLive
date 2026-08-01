@@ -45,7 +45,7 @@ def test_to_article_returns_none_for_a_malformed_item():
 
 
 def test_fetch_news_skips_a_failing_ticker_without_dropping_others():
-    def fake_ticker(symbol):
+    def fake_ticker(symbol, session=None):
         mock = MagicMock()
         if symbol == "BROKEN.JK":
             mock.get_news.side_effect = RuntimeError("Yahoo is down")
