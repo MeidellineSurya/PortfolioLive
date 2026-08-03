@@ -126,7 +126,7 @@ why the Docker `CMD` needs `exec`, and so on — is in
 | Backend | Python, FastAPI, WebSockets, Redis, [alpaca-py](https://github.com/alpacahq/alpaca-py) |
 | Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS, Recharts |
 | AI | Groq (`llama-3.3-70b-versatile`) for one-line news summaries |
-| Data | Alpaca Markets (free tier — 15-minute delayed IEX feed, US equities); Yahoo Finance (unofficial, `.JK` Indonesia tickers, via [`yfinance`](https://github.com/ranaroussi/yfinance)) |
+| Data | Alpaca Markets (free tier — real-time IEX exchange feed, not consolidated NBBO, US equities); Yahoo Finance (unofficial, `.JK` Indonesia tickers, via [`yfinance`](https://github.com/ranaroussi/yfinance)) |
 | Deploy | Backend: a free-tier Google Cloud e2-micro VM, running the same Docker image as local dev, with [Caddy](https://caddyserver.com) reverse-proxying HTTPS (auto-provisioned Let's Encrypt cert via [nip.io](https://nip.io), since there's no purchased domain). Frontend: Vercel. `backend/railway.toml` is kept for Railway as an alternative, but its free tier ($1/month credit after a one-time trial) isn't enough to run a backend + Redis continuously — see commit 32. |
 
 ## Project structure
@@ -298,8 +298,11 @@ instead — browsers can't set custom headers on a WS handshake).
   mode. Appears to be a Chrome headless-mode limitation around
   background push delivery, not an application bug — worth knowing if
   push notifications are ever automated-tested again.
-- **15-minute delayed data (US tickers).** Alpaca's free tier uses the
-  IEX feed, not full SIP — fine for a dashboard, not for trading
+- **Single-exchange (IEX) data, not consolidated (US tickers).** Alpaca's
+  free tier is real-time, not delayed — but it's IEX's own book only
+  (~2-3% of US equity volume), not the consolidated NBBO other quote
+  sources show. Prices can differ slightly from what you'd see
+  elsewhere at the same instant; fine for a dashboard, not for trading
   decisions.
 - **US equities and Indonesian (IDX) stocks only.** A consequence of
   using Alpaca's *stock* data endpoints specifically (Alpaca also has

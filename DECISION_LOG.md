@@ -2807,3 +2807,50 @@ Alpaca reconnect busy-loop).
   show a clean Alpaca stream connect and normal Yahoo/Alpaca news poll
   cycles with no repeated errors, and both the VM-local and external
   `/health` checks return 200.
+
+## Commit 38 — Fix: broken small app icons; misleading "delayed data" label
+
+**Files:** `frontend/app/icon.png`, `frontend/public/icons/icon-192.png`,
+`frontend/public/icons/apple-touch-icon.png`, `frontend/app/page.tsx`,
+`README.md`
+
+- **Broken icons.** User shared a screenshot of a real, working push
+  notification (confirmation the whole push pipeline from Commits 34
+  onward is genuinely functional end-to-end) falling back to Chrome's
+  generic icon instead of the app's own. Downloaded and visually
+  inspected every icon variant rather than guessing: `icon-512.png`
+  and `icon-maskable-512.png` were both correct (full trending-arrow
+  artwork), but `icon-192.png`, `apple-touch-icon.png` (180px), and
+  `app/icon.png` (the browser-tab favicon, also 192px) were all
+  cropped down to just a rounded corner with no visible artwork —
+  same symptom on every small size, correct on every large one,
+  pointing at a broken resize step rather than three independent
+  mistakes. No source SVG or icon-generation script exists in the
+  repo, so all three were regenerated directly from the working
+  512px PNG via `sips -Z` (scale, not crop) and visually re-verified
+  before committing. This means the browser tab favicon has been
+  silently showing a blank corner for as long as it's existed, not
+  just the push notification icon — same file, same bug.
+- **"15-minute delayed" label was actually wrong.** Verified against
+  Alpaca's own docs rather than trusting the app's existing copy (or
+  the original spec's assumption baked into it — see Commit 2): the
+  free tier's `v2/iex` feed, which is what `alpaca_client.py` actually
+  requests, is real-time. 15-minute-delayed data is a *different* feed
+  (`v2/delayed_sip`) this app never uses. The real reason prices can
+  differ from other quote sources (the question that surfaced this)
+  is that IEX is one exchange among many — roughly 2-3% of US equity
+  volume — not the consolidated NBBO most consumer quote sites show,
+  a scope difference rather than a time lag. Corrected in the app's
+  own subtitle text, the README tech-stack table, and its known-
+  constraints section. Left every *historical* DECISION_LOG mention of
+  "15-minute delayed" untouched (Commit 2, Commit ~27's summary) —
+  those document what was believed true at the time of that commit,
+  and rewriting history there would misrepresent the log's own stated
+  purpose as a per-commit record, not living documentation.
+- **Verification:** `tsc`/`eslint` clean (page.tsx's one-line text
+  change). Icons re-fetched from production after deploy and visually
+  confirmed correct. Committed as two separate commits (icons;
+  label/README) since they're unrelated fixes that happened to surface
+  in the same conversation, pushed, and confirmed live via Vercel's
+  now-working GitHub auto-deploy (Commit "Infra" entry above) rather
+  than assumed.
