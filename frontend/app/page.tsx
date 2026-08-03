@@ -410,7 +410,9 @@ export default function Home() {
           </div>
         </div>
         <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-          15-minute delayed prices via Alpaca (IEX feed, free tier); Indonesia (.JK) tickers via Yahoo Finance.
+          Real-time IEX exchange prices via Alpaca (free tier — not the consolidated
+          NBBO, so prices can differ slightly from other quote sources); Indonesia
+          (.JK) tickers via Yahoo Finance.
         </p>
         <div className="mt-4 flex flex-wrap gap-8">
           {rows.length === 0 ? (
