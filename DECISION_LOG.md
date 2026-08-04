@@ -2854,3 +2854,85 @@ Alpaca reconnect busy-loop).
   in the same conversation, pushed, and confirmed live via Vercel's
   now-working GitHub auto-deploy (Commit "Infra" entry above) rather
   than assumed.
+
+## Infra — VM froze for ~2 days from conntrack table exhaustion
+
+User reported "server down." External `/health` returned `000` (full
+connection failure, not even Caddy's 502) and SSH timed out completely
+with no login prompt at all — worse than the earlier 502 outage
+(Commit 37), where the process was merely unresponsive internally.
+`gcloud compute instances get-serial-port-output` showed routine
+systemd activity (a cert-refresh job firing every ~10 minutes without
+fail) right up until `Aug 2 00:00:15`, then nothing — silence for
+almost two full days until this report, meaning the freeze had likely
+gone unnoticed since shortly after midnight two days prior, not just
+"now."
+
+- **Reset first, investigate second — with an explicit ordering
+  tradeoff:** SSH being fully unreachable (no login prompt, not even a
+  slow one) meant there was no graceful diagnostic path, same as the
+  very first outage this session (snapd) — `gcloud compute instances
+  reset` was issued immediately given established precedent and the
+  user actively waiting, rather than re-confirming via AskUserQuestion
+  again for what's now a well-worn recovery procedure. Both containers
+  auto-recovered via `--restart unless-stopped`; `GET /portfolio`
+  confirmed the user's real holdings were intact afterward.
+- **First investigation pass came back empty — and that emptiness was
+  itself misleading.** `dmesg` and a `journalctl -k` query scoped to
+  the freeze window both returned nothing. Almost concluded the freeze
+  left no evidence at all, until realizing `dmesg`'s buffer is
+  in-memory and gets wiped by any reboot/reset — querying it
+  *after* the very reset that restored service could only ever come
+  back empty, regardless of what actually happened. That's a real
+  tradeoff made under time pressure (restoring service took priority
+  over preserving forensic state), not a dead end to report as fact.
+- **The persistent journal actually survived, though.** `journalctl
+  --list-boots` showed the frozen boot (`-1`, spanning 2026-07-29
+  18:13 through the reset) was still fully present — `Storage=auto` in
+  `journald.conf` had been using `/var/log/journal`'s on-disk storage
+  the whole time, so unlike `dmesg` this data wasn't actually lost.
+  The initial kernel-only (`-k`) filter had just missed the real
+  signal by scoping too narrowly; reading the plain tail of that
+  boot's full log (`journalctl -b -1`) immediately showed it: `kernel:
+  nf_conntrack: nf_conntrack: table full, dropping packet`, repeating
+  continuously for at least the last hour before the reset.
+- **Root cause:** `net.netfilter.nf_conntrack_max` was **7680** —
+  Linux auto-scales this from available RAM at boot, and this
+  e2-micro's ~958MB landed on a table far too small for a server
+  running a persistent Alpaca WebSocket stream, frequent outbound
+  polling (Yahoo every 20s, Alpaca/Yahoo news every 60s, Groq calls),
+  and ordinary inbound internet traffic on a public IP, sustained over
+  the ~3.5 days this boot ran. Once the table filled, the kernel
+  dropped *every new connection attempt* — not just app traffic but
+  SSH and Caddy too, which is exactly why the whole VM looked
+  "completely gone" rather than just the backend being unhealthy: this
+  was a kernel networking-layer failure, not a process-level one, so
+  none of the three previously-fixed causes (snapd, swap, the Alpaca
+  reconnect loop, the yfinance FD leak) were ever going to explain it.
+- **Fix:** `net.netfilter.nf_conntrack_max` raised to 131072 (~17x)
+  via `/etc/sysctl.d/99-conntrack.conf`, applied live with `sysctl -p`
+  and persisted across future reboots. Cost is small and affordable —
+  each conntrack entry is roughly 300-350 bytes of kernel memory, so
+  even the new ceiling is only ~40-45MB against this machine's total
+  RAM, with swap already in place as a backstop if it's ever wrong.
+  Same "raise a too-small ceiling substantially" strategy already
+  applied to the file-descriptor ulimit in Commit 37 — not a
+  guarantee this specific number is exactly right forever, but a large
+  enough margin that hitting it again should take much longer than 3.5
+  days, if it happens again at all.
+- **Verification:** confirmed live — `sysctl net.netfilter.nf_conntrack_max`
+  reports 131072 immediately after applying, and external `/health`
+  returns 200. Worth watching `net.netfilter.nf_conntrack_count`
+  periodically going forward now that there's a concrete number to
+  compare against, rather than only finding out via another full
+  outage.
+- **Also discovered while fixing this: the swap file from an earlier
+  outage was never baked into the VM's startup-script metadata
+  either** — it had only ever been applied by hand over SSH, so a full
+  VM recreation (not just a reboot, which this instance's disk
+  survives fine) would have silently lost it, same gap this conntrack
+  fix would otherwise have had. Rewrote the startup-script metadata to
+  include both the swap setup and the conntrack sysctl alongside the
+  existing snapd-masking step, all guarded to be safe to re-run on
+  every boot (GCE runs `startup-script` on every boot, not just the
+  first) rather than assuming first-boot-only semantics.
