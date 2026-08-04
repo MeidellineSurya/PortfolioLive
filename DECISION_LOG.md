@@ -2936,3 +2936,39 @@ gone unnoticed since shortly after midnight two days prior, not just
   existing snapd-masking step, all guarded to be safe to re-run on
   every boot (GCE runs `startup-script` on every boot, not just the
   first) rather than assuming first-boot-only semantics.
+
+## Infra — Switched production frontend to a clean vercel.app alias
+
+User flagged that push notifications on macOS show the sending app's
+icon prominently (Chrome — confirmed as a genuine, unfixable macOS
+notification convention, not a bug: every website's Chrome/Edge push
+notification looks like this on macOS, not just this app's), but the
+notification's subtitle line — Chrome's own "which site sent this"
+label — was showing `frontend-indol-pi-2hbubg68hv.vercel.app`, an
+Vercel-auto-generated hash-suffixed domain from when the project was
+first deployed (plain `frontend.vercel.app` was already taken
+globally — a generic word, high collision odds).
+
+- **Claimed a clean alias:** `portfoliolive-app.vercel.app` (plain
+  `portfoliolive.vercel.app` was already taken by someone else;
+  several `-app`/`-dashboard` variants were briefly claimed to check
+  availability, then all but this one removed via `vercel alias rm`).
+  Purely additive at this point — the old domain kept working
+  unchanged, aliases just point additional hostnames at the same
+  deployment.
+- **Asked before actually switching over**, since `main.py`'s CORS
+  config (`allow_origins=[FRONTEND_ORIGIN]`) only ever allows a single
+  origin — actually using the new domain, not just having it resolve,
+  meant the old one would stop being able to reach the API at all, and
+  push subscriptions (origin-scoped) wouldn't carry over, requiring
+  the user to re-enable notifications on the new domain. User chose to
+  switch.
+- **Fix:** redeployed the backend container with
+  `FRONTEND_ORIGIN=https://portfoliolive-app.vercel.app`. Confirmed via
+  `curl -H "Origin: ..."` against both domains: the new one gets a
+  matching `access-control-allow-origin` header back, the old one gets
+  none — the switch is real, not just additive.
+- No code/repo references to the old domain existed anywhere to clean
+  up (grepped for it — only ever lived in the backend's env var and in
+  conversation/DECISION_LOG history, the latter left untouched per the
+  log's own stated purpose as a per-commit record).
