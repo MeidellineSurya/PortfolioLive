@@ -2972,3 +2972,41 @@ globally — a generic word, high collision odds).
   up (grepped for it — only ever lived in the backend's env var and in
   conversation/DECISION_LOG history, the latter left untouched per the
   log's own stated purpose as a per-commit record).
+
+## Commit 39 — Fix: analytics snapshots dropping a whole currency after a restart
+
+**Files:** `backend/analytics_service.py`
+
+Found by actually driving the live app end-to-end right after shipping
+the four features above (the `run` skill, against production —
+exactly the kind of gap that only shows up under real use, not typecheck
+or unit tests): `/analytics` rendered with only an IDR section — no USD
+total, no USD line in "By Holding" — despite the dashboard itself
+correctly showing all 5 holdings (3 USD, 2 IDR) priced.
+
+- **Root cause:** `snapshot_once()` sourced every holding's price
+  from `WebSocketManager.get_last_prices()` only, with no fallback —
+  so a backend restart landing while US markets are closed means
+  every hourly snapshot silently excludes every USD holding entirely
+  (not blank, *absent*) until a live Alpaca tick eventually arrives.
+  Confirmed directly via the raw API: the latest snapshot's `holdings`
+  had only `TLKM.JK`/`BBCA.JK`, `totals` had only `"IDR"` — even
+  though `GET /portfolio` was correctly showing last-known USD prices
+  the whole time. This is the exact same gap Commit 36 already fixed
+  for the dashboard's REST endpoints
+  (`enrich_holdings`/`enrich_watchlist` falling back to
+  `get_prev_close()`) — that fix just never got extended to the
+  analytics snapshot loop, a separate code path with the identical
+  underlying assumption.
+- **Fix:** `snapshot_once()` now falls back to
+  `self._ws_manager.get_prev_close()` the same way, one line:
+  `last_prices.get(holding.ticker, prev_close.get(holding.ticker))`.
+- **No new test added** — `snapshot_once()` writes to Redis
+  (`zadd`/`zremrangebyscore`), and this codebase's established
+  convention (see `test_auth.py`'s comment on `bootstrap_user`/
+  `verify_login`) is that Redis-touching code paths are covered by
+  live verification, not unit tests with a real or faked Redis
+  instance. Consistent with that: verified live instead — redeployed,
+  then confirmed via the raw `GET /analytics` response that `totals`
+  immediately included both `"USD"` and `"IDR"` again, and the latest
+  snapshot's `holdings` had all 5 tickers.
