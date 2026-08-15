@@ -73,6 +73,7 @@ class PriceUpdate(BaseModel):
     position_value: float
     position_pnl: float
     position_pnl_pct: float
+    timestamp: str
 
 
 class NewsItem(BaseModel):
@@ -201,6 +202,7 @@ class WatchlistPriceUpdate(BaseModel):
     currency: Literal["USD", "IDR"]
     change: float
     change_pct: float
+    timestamp: str
 
 
 class PushSubscriptionKeys(BaseModel):

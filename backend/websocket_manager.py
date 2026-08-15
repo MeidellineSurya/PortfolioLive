@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 from fastapi import WebSocket
 
@@ -258,6 +259,11 @@ class WebSocketManager:
         last_broadcast = self._last_broadcast_at.get(ticker)
         if last_broadcast is None or now - last_broadcast >= BROADCAST_THROTTLE_SECONDS:
             self._last_broadcast_at[ticker] = now
+            # `now` above is a monotonic clock (arbitrary epoch, throttle
+            # math only) — not wall-clock time, so it can't double as the
+            # broadcast timestamp. A distinct wall-clock read, named
+            # differently on purpose, avoids that mix-up.
+            tick_time = datetime.now(timezone.utc).isoformat()
             if holding is not None:
                 position_value, position_pnl, position_pnl_pct = self._position_math(holding, price)
                 update = PriceUpdate(
@@ -269,6 +275,7 @@ class WebSocketManager:
                     position_value=round(position_value, 2),
                     position_pnl=round(position_pnl, 2),
                     position_pnl_pct=round(position_pnl_pct, 4),
+                    timestamp=tick_time,
                 )
                 await self.broadcast(update.model_dump())
             else:
@@ -278,6 +285,7 @@ class WebSocketManager:
                     currency=currency,
                     change=round(change, 4),
                     change_pct=round(change_pct, 4),
+                    timestamp=tick_time,
                 )
                 await self.broadcast(watch_update.model_dump())
 

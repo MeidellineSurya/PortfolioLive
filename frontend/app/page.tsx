@@ -84,7 +84,10 @@ function portfolioReducer(state: PortfolioState, action: PortfolioAction): Portf
       // backend. Dropping it here mirrors the backend's own stale-tick
       // handling (websocket_manager.py, commit 3).
       if (!existing) return state;
-      const priceHistory = [...(existing.priceHistory ?? []), action.update.price].slice(-MAX_PRICE_HISTORY);
+      const priceHistory = [
+        ...(existing.priceHistory ?? []),
+        { price: action.update.price, timestamp: action.update.timestamp },
+      ].slice(-MAX_PRICE_HISTORY);
       return { ...state, [action.update.ticker]: { ...existing, ...action.update, priceHistory } };
     }
     default:
@@ -132,7 +135,10 @@ function watchlistReducer(state: WatchlistState, action: WatchlistAction): Watch
       const existing = state[action.update.ticker];
       // Same stale-tick guard as PRICE_UPDATE above, for the same reason.
       if (!existing) return state;
-      const priceHistory = [...(existing.priceHistory ?? []), action.update.price].slice(-MAX_PRICE_HISTORY);
+      const priceHistory = [
+        ...(existing.priceHistory ?? []),
+        { price: action.update.price, timestamp: action.update.timestamp },
+      ].slice(-MAX_PRICE_HISTORY);
       return { ...state, [action.update.ticker]: { ...existing, ...action.update, priceHistory } };
     }
     default:

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -101,6 +102,21 @@ def test_on_quote_attaches_currency_derived_from_ticker_suffix():
 
     broadcast_message = manager.broadcast.await_args.args[0]
     assert broadcast_message["currency"] == "IDR"
+
+
+def test_on_quote_includes_a_wall_clock_timestamp_on_broadcast_messages(manager):
+    async def run():
+        manager.broadcast = AsyncMock()
+        await manager.on_quote("AAPL", 200.0)
+
+    asyncio.run(run())
+
+    broadcast_message = manager.broadcast.await_args.args[0]
+    assert "timestamp" in broadcast_message
+    # Round-trips through fromisoformat without raising — confirms it's a
+    # real, parseable wall-clock timestamp, not the monotonic clock used
+    # for throttle math (which has an arbitrary, non-wall-clock epoch).
+    datetime.fromisoformat(broadcast_message["timestamp"])
 
 
 def test_track_ticker_routes_to_the_client_matching_the_tickers_currency():

@@ -55,7 +55,13 @@ export type PriceUpdate = {
   position_value: number;
   position_pnl: number;
   position_pnl_pct: number;
+  timestamp: string;
 };
+
+// One point in a row's rolling priceHistory window — timestamped so a
+// price tick can be time-correlated against other timestamped data (e.g.
+// news `published_at`) rather than only ever comparable by index position.
+export type PricePoint = { price: number; timestamp: string };
 
 export type NewsItem = {
   type: "news_update";
@@ -89,6 +95,7 @@ export type WatchlistPriceUpdate = {
   currency: Currency;
   change: number;
   change_pct: number;
+  timestamp: string;
 };
 
 export type WSMessage = PriceUpdate | NewsItem | PriceAlertTriggered | WatchlistPriceUpdate;
@@ -106,7 +113,7 @@ export type WatchlistItem = {
 // first tick" reasoning as PortfolioRow below — plus client-only
 // `priceHistory` for its sparkline.
 export type WatchlistRow = WatchlistItem & {
-  priceHistory?: number[];
+  priceHistory?: PricePoint[];
 };
 
 export type PriceAlert = {
@@ -158,6 +165,6 @@ export type AnalyticsResponse = {
 // the last N prices seen, oldest first, for the row's sparkline.
 export type PortfolioRow = Holding &
   Partial<Omit<PriceUpdate, "type" | "ticker">> & {
-    priceHistory?: number[];
+    priceHistory?: PricePoint[];
   };
 
