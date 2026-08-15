@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -14,12 +16,14 @@ import {
 
 import { authFetch, useRequireAuth } from "@/lib/auth";
 import type { AnalyticsResponse, Currency, PortfolioSnapshot } from "@/lib/types";
+import { currencyForTicker } from "@/lib/types";
 import { formatPercent, formatSignedCurrency } from "@/lib/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const HISTORY_DAYS = 30;
 const POSITIVE_COLOR = "#10b981"; // emerald-500
 const NEGATIVE_COLOR = "#ef4444"; // red-500
+const TOTAL_COLOR = "#a3a3a3"; // neutral-400 — distinguishes Start/End totals from per-ticker contributions
 
 function formatAxisDate(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -44,6 +48,95 @@ function buildCurrencySeries(history: PortfolioSnapshot[], currency: string) {
   return history
     .filter((snapshot) => currency in snapshot.totals)
     .map((snapshot) => ({ timestamp: snapshot.timestamp, total_pnl_pct: snapshot.totals[currency].total_pnl_pct }));
+}
+
+type WaterfallRow = {
+  label: string;
+  base: number;
+  value: number;
+  isPositive: boolean;
+  isTotal?: boolean;
+  status?: "new" | "closed";
+};
+
+// Diffs each holding's `value` between the first and last snapshot in the
+// window. This is a *net value change* — price moves and any buys/sells
+// combined — not pure price attribution, since HoldingSnapshot stores no
+// quantity to separate the two. Labeled as such in the UI rather than
+// "price contribution". Because a snapshot's total_value is literally the
+// sum of that snapshot's holding values, startTotal + sum(deltas) ==
+// endTotal exactly (barring float rounding) — no "other" bar needed.
+function buildWaterfallData(history: PortfolioSnapshot[], currency: Currency): WaterfallRow[] {
+  if (history.length < 2) return [];
+  const earliest = history[0];
+  const latest = history[history.length - 1];
+  const startTotal = earliest.totals[currency]?.total_value ?? 0;
+  if (!(currency in earliest.totals) && !(currency in latest.totals)) return [];
+
+  const tickers = new Set(
+    [...Object.keys(earliest.holdings), ...Object.keys(latest.holdings)].filter(
+      (ticker) => currencyForTicker(ticker) === currency
+    )
+  );
+
+  const deltas = [...tickers]
+    .map((ticker) => {
+      const startValue = earliest.holdings[ticker]?.value ?? 0;
+      const endValue = latest.holdings[ticker]?.value ?? 0;
+      const status = !(ticker in earliest.holdings)
+        ? ("new" as const)
+        : !(ticker in latest.holdings)
+          ? ("closed" as const)
+          : undefined;
+      return { ticker, delta: endValue - startValue, status };
+    })
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+
+  let running = startTotal;
+  const rows: WaterfallRow[] = [{ label: "Start", base: 0, value: startTotal, isPositive: true, isTotal: true }];
+  for (const { ticker, delta, status } of deltas) {
+    const base = Math.min(running, running + delta);
+    rows.push({ label: ticker, base, value: Math.abs(delta), isPositive: delta >= 0, status });
+    running += delta;
+  }
+  rows.push({ label: "End", base: 0, value: running, isPositive: true, isTotal: true });
+  return rows;
+}
+
+// Recharts' <Cell> is deprecated in favour of a custom `shape` on <Bar> —
+// this renders each bar's fill based on its own datum (positive/negative
+// contribution vs. a neutral Start/End total) rather than one fixed color
+// for the whole series. `payload` is typed `any` by Recharts itself.
+function WaterfallBarShape(props: { x?: number; y?: number; width?: number; height?: number; payload?: unknown }) {
+  const { x = 0, y = 0, width = 0, height = 0, payload } = props;
+  const row = payload as WaterfallRow;
+  const fill = row.isTotal ? TOTAL_COLOR : row.isPositive ? POSITIVE_COLOR : NEGATIVE_COLOR;
+  return <rect x={x} y={y} width={width} height={height} fill={fill} rx={2} />;
+}
+
+function WaterfallTooltip({
+  active,
+  payload,
+  currency,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: WaterfallRow }>;
+  currency: Currency;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const row = payload[0].payload;
+  return (
+    <div className="rounded border border-neutral-200 bg-white px-2 py-1 text-xs shadow dark:border-neutral-700 dark:bg-neutral-900">
+      <div className="font-medium">{row.label}</div>
+      {!row.isTotal && (
+        <div className={row.isPositive ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}>
+          {formatSignedCurrency(row.isPositive ? row.value : -row.value, currency)}
+          {row.status === "new" && " · new this window"}
+          {row.status === "closed" && " · closed this window"}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function AnalyticsPage() {
@@ -229,6 +322,71 @@ export default function AnalyticsPage() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">
+              Contribution to Value Change ({HISTORY_DAYS}d)
+            </h2>
+            <p className="mb-3 text-xs text-neutral-500 dark:text-neutral-400">
+              Reflects each holding&apos;s net change in value over this window — including any buys or
+              sells, not price movement alone.
+            </p>
+            {currencies.length === 0 ? (
+              <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                Not enough history yet — snapshots are taken hourly, check back once a few have accumulated.
+              </p>
+            ) : (
+              <div className="space-y-6">
+                {currencies.map((currency) => {
+                  const rows = buildWaterfallData(data.history, currency as Currency);
+                  return (
+                    <div key={currency}>
+                      <div className="mb-2 text-xs font-medium text-neutral-600 dark:text-neutral-300">
+                        {currency}
+                      </div>
+                      {rows.length === 0 ? (
+                        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                          Not enough history yet — snapshots are taken hourly, check back once a few have
+                          accumulated.
+                        </p>
+                      ) : (
+                        <div className="h-64">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={rows}>
+                              <CartesianGrid
+                                strokeDasharray="3 3"
+                                className="stroke-neutral-200 dark:stroke-neutral-800"
+                              />
+                              <XAxis
+                                dataKey="label"
+                                tick={{ fontSize: 11 }}
+                                stroke="currentColor"
+                                className="text-neutral-500 dark:text-neutral-400"
+                              />
+                              <YAxis
+                                tickFormatter={(value: number) => formatSignedCurrency(value, currency as Currency)}
+                                tick={{ fontSize: 11 }}
+                                stroke="currentColor"
+                                className="text-neutral-500 dark:text-neutral-400"
+                              />
+                              <Tooltip content={<WaterfallTooltip currency={currency as Currency} />} />
+                              <Bar dataKey="base" stackId="wf" fill="transparent" isAnimationActive={false} />
+                              <Bar
+                                dataKey="value"
+                                stackId="wf"
+                                isAnimationActive={false}
+                                shape={WaterfallBarShape}
+                              />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
