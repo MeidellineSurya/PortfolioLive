@@ -66,6 +66,7 @@ class AnalyticsService:
             return None
 
         last_prices = self._ws_manager.get_last_prices()
+        prev_close = self._ws_manager.get_prev_close()
         holding_snapshots: dict[str, HoldingSnapshot] = {}
         # Accumulated per currency, not into one pair of scalars — a $
         # value and an Rp value can't be summed together without an FX
@@ -74,13 +75,22 @@ class AnalyticsService:
         cost_basis_by_currency: dict[str, float] = {}
 
         for holding in holdings:
-            price = last_prices.get(holding.ticker)
+            # Falls back to the previous close the same way
+            # enrich_holdings/enrich_watchlist do (websocket_manager.py) —
+            # without this, a process restart landing outside market hours
+            # (no live tick seen yet this process's lifetime) silently
+            # dropped that ticker's *entire currency* from every hourly
+            # snapshot taken until the market reopened, confirmed live: a
+            # snapshot taken shortly after a restart had IDR holdings only,
+            # USD ones missing outright, even though GET /portfolio was
+            # already showing correct last-known USD prices via the same
+            # fallback on the dashboard side.
+            price = last_prices.get(holding.ticker, prev_close.get(holding.ticker))
             if price is None:
-                # No live tick seen yet this process's lifetime (just
-                # added, or the market's been closed this whole time) —
-                # can't compute a value without a price, and falling back
-                # to avg_cost would misrepresent "unknown" as a real data
-                # point in the history this powers.
+                # Genuinely never known — just added, or no live tick and
+                # no prev_close fetched yet. Falling back to avg_cost
+                # would misrepresent "unknown" as a real data point in
+                # the history this powers.
                 continue
             cost_basis = holding.avg_cost * holding.quantity
             value = price * holding.quantity
