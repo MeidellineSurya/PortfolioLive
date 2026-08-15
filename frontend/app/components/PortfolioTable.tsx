@@ -3,18 +3,26 @@
 import { useState, type FormEvent } from "react";
 import MarketStatusBadge from "./MarketStatusBadge";
 import PriceSparkline from "./PriceSparkline";
-import type { PortfolioRow, PriceAlert } from "@/lib/types";
+import type { NewsItem, PortfolioRow, PriceAlert } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 type PortfolioTableProps = {
   rows: PortfolioRow[];
   alerts: PriceAlert[];
+  newsByTicker: Record<string, NewsItem[]>;
   onRemove: (ticker: string) => void;
   onSetAlert: (ticker: string, targetPrice: number) => void;
   onDeleteAlert: (id: string) => void;
 };
 
-export default function PortfolioTable({ rows, alerts, onRemove, onSetAlert, onDeleteAlert }: PortfolioTableProps) {
+export default function PortfolioTable({
+  rows,
+  alerts,
+  newsByTicker,
+  onRemove,
+  onSetAlert,
+  onDeleteAlert,
+}: PortfolioTableProps) {
   if (rows.length === 0) {
     return (
       <p className="text-sm text-neutral-500 dark:text-neutral-400">
@@ -53,6 +61,7 @@ export default function PortfolioTable({ rows, alerts, onRemove, onSetAlert, onD
                 key={row.ticker}
                 row={row}
                 alerts={alerts.filter((alert) => alert.ticker === row.ticker)}
+                news={newsByTicker[row.ticker] ?? []}
                 onRemove={onRemove}
                 onSetAlert={onSetAlert}
                 onDeleteAlert={onDeleteAlert}
@@ -68,6 +77,7 @@ export default function PortfolioTable({ rows, alerts, onRemove, onSetAlert, onD
             key={row.ticker}
             row={row}
             alerts={alerts.filter((alert) => alert.ticker === row.ticker)}
+            news={newsByTicker[row.ticker] ?? []}
             onRemove={onRemove}
             onSetAlert={onSetAlert}
             onDeleteAlert={onDeleteAlert}
@@ -81,12 +91,14 @@ export default function PortfolioTable({ rows, alerts, onRemove, onSetAlert, onD
 function PortfolioRowView({
   row,
   alerts,
+  news,
   onRemove,
   onSetAlert,
   onDeleteAlert,
 }: {
   row: PortfolioRow;
   alerts: PriceAlert[];
+  news: NewsItem[];
   onRemove: (ticker: string) => void;
   onSetAlert: (ticker: string, targetPrice: number) => void;
   onDeleteAlert: (id: string) => void;
@@ -120,7 +132,7 @@ function PortfolioRowView({
         {hasLiveData ? formatCurrency(row.price!, currency) : "—"}
       </td>
       <td className="py-2 pr-4">
-        <PriceSparkline prices={row.priceHistory ?? []} />
+        <PriceSparkline prices={row.priceHistory ?? []} news={news} />
       </td>
       <td className="py-2 pr-4 tabular-nums">
         {row.position_value !== undefined ? formatCurrency(row.position_value, currency) : "—"}
@@ -216,12 +228,14 @@ function PortfolioRowView({
 function PortfolioRowCard({
   row,
   alerts,
+  news,
   onRemove,
   onSetAlert,
   onDeleteAlert,
 }: {
   row: PortfolioRow;
   alerts: PriceAlert[];
+  news: NewsItem[];
   onRemove: (ticker: string) => void;
   onSetAlert: (ticker: string, targetPrice: number) => void;
   onDeleteAlert: (id: string) => void;
@@ -270,7 +284,7 @@ function PortfolioRowCard({
       </div>
 
       <div className="mt-2">
-        <PriceSparkline prices={row.priceHistory ?? []} />
+        <PriceSparkline prices={row.priceHistory ?? []} news={news} />
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1">

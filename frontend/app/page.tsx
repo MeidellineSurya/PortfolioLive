@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 
 import AddTickerForm from "./components/AddTickerForm";
 import NewsFeed from "./components/NewsFeed";
@@ -151,6 +151,16 @@ export default function Home() {
   const [portfolio, dispatch] = useReducer(portfolioReducer, {});
   const [watchlist, watchlistDispatch] = useReducer(watchlistReducer, {});
   const [news, setNews] = useState<NewsItem[]>([]);
+  // Grouped by ticker for PriceSparkline's chart-annotation markers —
+  // `news` itself stays a flat, most-recent-first list (that's what
+  // NewsFeed wants), this is a derived view for a different consumer.
+  const newsByTicker = useMemo(() => {
+    const map: Record<string, NewsItem[]> = {};
+    for (const item of news) {
+      (map[item.ticker] ??= []).push(item);
+    }
+    return map;
+  }, [news]);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   // The browser WebSocket API can't set an Authorization header, so the
@@ -463,6 +473,7 @@ export default function Home() {
             <PortfolioTable
               rows={rows}
               alerts={alerts}
+              newsByTicker={newsByTicker}
               onRemove={handleRemove}
               onSetAlert={handleSetAlert}
               onDeleteAlert={handleDeleteAlert}
@@ -478,6 +489,7 @@ export default function Home() {
             </p>
             <WatchlistSection
               rows={watchlistRows}
+              newsByTicker={newsByTicker}
               onAdd={handleAddToWatchlist}
               onRemove={handleRemoveFromWatchlist}
             />

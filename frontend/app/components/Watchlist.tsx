@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 import MarketStatusBadge from "./MarketStatusBadge";
 import PriceSparkline from "./PriceSparkline";
-import type { WatchlistRow } from "@/lib/types";
+import type { NewsItem, WatchlistRow } from "@/lib/types";
 import { formatCurrency, formatPercent, formatSignedCurrency } from "@/lib/format";
 
 // Mirrors backend/models.py's TICKER_RE, same reasoning as AddTickerForm
@@ -12,11 +12,12 @@ const TICKER_RE = /^[A-Z]{1,5}(\.JK)?$/;
 
 type WatchlistProps = {
   rows: WatchlistRow[];
+  newsByTicker: Record<string, NewsItem[]>;
   onAdd: (ticker: string) => void;
   onRemove: (ticker: string) => void;
 };
 
-export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
+export default function Watchlist({ rows, newsByTicker, onAdd, onRemove }: WatchlistProps) {
   const [ticker, setTicker] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -101,7 +102,7 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
                         {hasLiveData ? formatCurrency(row.price!, currency) : "—"}
                       </td>
                       <td className="py-2 pr-4">
-                        <PriceSparkline prices={row.priceHistory ?? []} />
+                        <PriceSparkline prices={row.priceHistory ?? []} news={newsByTicker[row.ticker] ?? []} />
                       </td>
                       <td className={`py-2 pr-4 tabular-nums ${changeColor}`}>
                         {row.change !== undefined ? formatSignedCurrency(row.change, currency) : "—"}
@@ -128,7 +129,12 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
 
           <div className="space-y-3 sm:hidden">
             {rows.map((row) => (
-              <WatchlistRowCard key={row.ticker} row={row} onRemove={onRemove} />
+              <WatchlistRowCard
+                key={row.ticker}
+                row={row}
+                news={newsByTicker[row.ticker] ?? []}
+                onRemove={onRemove}
+              />
             ))}
           </div>
         </>
@@ -137,7 +143,15 @@ export default function Watchlist({ rows, onAdd, onRemove }: WatchlistProps) {
   );
 }
 
-function WatchlistRowCard({ row, onRemove }: { row: WatchlistRow; onRemove: (ticker: string) => void }) {
+function WatchlistRowCard({
+  row,
+  news,
+  onRemove,
+}: {
+  row: WatchlistRow;
+  news: NewsItem[];
+  onRemove: (ticker: string) => void;
+}) {
   const hasLiveData = row.price !== undefined;
   const currency = row.currency ?? "USD";
   const changePositive = (row.change ?? 0) >= 0;
@@ -165,7 +179,7 @@ function WatchlistRowCard({ row, onRemove }: { row: WatchlistRow; onRemove: (tic
       </div>
 
       <div className="mt-2">
-        <PriceSparkline prices={row.priceHistory ?? []} />
+        <PriceSparkline prices={row.priceHistory ?? []} news={news} />
       </div>
 
       <button
