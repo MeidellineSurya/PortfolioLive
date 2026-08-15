@@ -39,7 +39,14 @@ LOAD_MORE_FETCH_MULTIPLIER = 3
 
 SYSTEM_PROMPT = (
     "You summarise financial news in exactly one sentence under 20 words. "
-    "Focus on market impact. Never start with 'The'."
+    "Focus on market impact. Never start with 'The'. "
+    "Most articles are routine — summarise them plainly, with no hedging or "
+    "editorializing. Only if the article itself contains a specific figure or "
+    "claim that looks internally inconsistent, contradicts another figure in "
+    "the same article, or is implausible for a company/event of this kind, "
+    "briefly flag that within the same sentence using a short qualifier "
+    "(e.g. 'unverified', 'oddly high', 'contradicts...') rather than a "
+    "separate clause."
 )
 
 
